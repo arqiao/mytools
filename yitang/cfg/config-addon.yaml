@@ -1,0 +1,63 @@
+# yitang_addon 配置 — 逐字稿信息拓展
+
+# 输入文件配置
+input:
+  # 逐字稿本地文件（从飞书导出的 md/txt）
+  transcript: "https://arqiaoknow.feishu.cn/wiki/Z1i7witDZiX4YpkoH6kcHzFNnNF"
+  # 字幕文件（.srt 格式）
+  subtitle: "AI落地Live_069_wm.srt"
+  # 讨论区文件（.xlsx 格式，yitang_video.py --chat 导出）
+  discussion: "Live245_情报调研第一课.xlsx"
+
+# LLM 配置
+llm:
+  # 当前使用的模型提供商：minimax / volcengine / dashscope / deepseek
+  provider: "minimax"
+
+  # 各提供商模型配置
+  minimax:
+    model: "MiniMax-Text-01"
+    base_url: "https://api.minimax.chat/v1"
+    max_tokens: 8192
+    temperature: 0.3
+
+  volcengine:  # 火山方舟（豆包）
+    model: "doubao-1.5-pro-256k"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    max_tokens: 8192
+    temperature: 0.3
+
+  dashscope:  # 阿里云百炼
+    model: "qwen-max"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    max_tokens: 8192
+    temperature: 0.3
+
+  deepseek:
+    model: "deepseek-chat"
+    base_url: "https://api.deepseek.com/v1"
+    max_tokens: 8192
+    temperature: 0.3
+
+# 输出配置
+output:
+  dir: "localscript"  # 输出目录
+  # 文件名前缀，留空则自动从输入文件名生成
+  prefix: ""
+
+# 分析配置
+analysis:
+  # 字幕对比时的分段大小（字符数），过大可能超出上下文窗口
+  chunk_size: 30000
+  # 提示词文件（相对于 cfg 目录）
+  prompt_subtitle: "prompt-subtitle.md"
+  prompt_discussion: "prompt-discussion.md"
+  prompt_digest: "prompt-digest.md"
+  # 信息分类标签
+  categories:
+    - "观点"
+    - "金句"
+    - "数字细节"
+    - "扩展案例"
+    - "推荐资源"
+    - "其他"

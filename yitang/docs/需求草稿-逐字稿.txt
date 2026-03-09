@@ -1,0 +1,17 @@
+编写一个python程序。我想把来自一堂文档的内容自动拷贝到我的飞书文档中。
+
+输入文件及输出文件都写在一个yaml格式的文件中进行配置，一个输入文件对应一个输出文件。可能有多组。
+源文件示例：https://yitang.top/fs-doc/ee2054fcab4a47b65cb76a7b5b151cfb/GiJLdIkGEoSIpdxmFiWcmPOfnyg
+目标文件地址：https://arqiaoknow.feishu.cn/wiki/Z1i7witDZiX4YpkoH6kcHzFNnNF
+
+
+内容复制要求：
+1) 无需复制源文件的总标题。
+2) 正文内容从“开始上课”章节开始，到“作业与Candy”章节结束。之前及之后的内容都不需要复制。
+3) 保留源文件的各章节标题、文字的内容及样式，保留图表，保留图片。
+4) 对于无法复制的内容，给出其上下文相关的提示信息、缺失情况及原因，并以专门的log文件予以说明。
+
+关于飞书文档所需的密钥等，可参照D:\workspace\clawbots\feishuMSG-xls\credentials.yaml内容信息。
+因为源文件所在网站具有反爬特性，我可配合你进一步获取相关cookie等信息。
+
+关于这些需求内容，你是否已经了解清楚了？

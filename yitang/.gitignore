@@ -1,0 +1,12 @@
+cfg/credentials.yaml
+log-err/
+__pycache__/
+*.pyc
+_todo_draft.md
+temp_images/
+.progress_*
+localscript/
+ok_images/
+.claude/
+.specstory/
+.cursorindexingignore

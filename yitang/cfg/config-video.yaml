@@ -1,0 +1,28 @@
+# 直播视频下载配置
+# 可配置多组，每组对应一个直播回放
+
+# 输出目录（相对于项目根目录）
+output_dir: "localscript"
+
+# 输出文件名前缀
+output_prefix: "AI落地Live_"
+
+livestreams:
+  - source_url: "https://air.yitang.top/live/QogYGcdsVO"
+    # 可选：手动指定标题（覆盖自动获取）
+    # title: ""
+    # 这是周五直播课的链接。
+
+  - source_url: "https://air.yitang.top/live/gXIWPq5Lid?rs=765&lessonId=dKPk6979e7e5510e&noTrial=1&_uds=pd_lesson_detail_air&ticket=oe9x1xEC0Z1qmM3H&u=355973"
+    # title: "课程具体名称"
+    # 这是专题课的链接。
+
+
+  # 可继续添加更多组...
+  # - source_url: "https://air.yitang.top/live/其他ID"
+  #   title: "课程名称"  # 可选
+
+  # - source_url: "https://air.yitang.top/live/YYOkdYDSJ2"
+    # 可选：手动指定标题（覆盖自动获取）
+    # title: ""
+    # 这是AI落地Live直播课的链接。

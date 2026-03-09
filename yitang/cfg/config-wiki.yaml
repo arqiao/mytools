@@ -1,0 +1,22 @@
+mappings:
+  - source_url: "https://yitanger.feishu.cn/docx/EYnqdLDB8owDdlx8tWUcyzTdnRf"
+    target_url: "https://arqiaoknow.feishu.cn/wiki/Qo2WwOEjtisyFtk8p1GcUCuenzd"
+    # 标题自动编号（可选，不配置则不编号）
+    heading_number:
+      start_heading: "分享这本书的原因"  # 从哪个标题开始编号
+      end_heading: ""                     # 到哪个标题结束，留空则到末尾
+    # 本地导出文件名（可选，不配置则不导出；相对路径基于 local_export_dir）
+    local_export: "逐字稿_需求实操3_评估篇.md"
+  # 可继续添加更多组...
+
+# 本地导出目录（相对于项目根目录）
+local_export_dir: "localscript"
+
+# 内容过滤范围（章节标题关键词，所有映射共用）
+content_range:
+  start_heading: "开始上课"
+  end_heading: "作业与Candy"
+
+# 标题匹配规则：匹配以下关键词时，复制全文不进行章节过滤
+full_copy_titles:
+  - "AI落地Live"

@@ -1,0 +1,11 @@
+# 字幕引擎后缀映射（引擎名 → 文件名后缀）
+engine_suffix:
+  xunfei: "_xunfei"
+  aliyun: "_aliyun"
+  doubao: "_doubao"
+  feishu: "_feishu"
+  tencent: "_tencent"
+  whisper_large: "_wl"
+  whisper_medium: "_wm"
+  whisper_small: "_ws"
+  whisper_tiny: "_wt"
