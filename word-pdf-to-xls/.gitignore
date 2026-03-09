@@ -1,0 +1,13 @@
+# 数据文件（PDF、Excel）
+*.pdf
+*.xls
+*.xlsx
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE / 编辑器
+.claude/
+.specstory/
+.cursorindexingignore

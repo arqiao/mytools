@@ -1,0 +1,13 @@
+# 睿途词汇提取配置文件
+
+# 词汇文件子目录名（相对于项目根目录）
+vocab_dir: "2603-KN3下"
+
+# 输入的词汇书 PDF 文件名
+pdf_filename: "6. 睿途国际词汇书排版3.0-K3下.pdf"
+
+# 输出 Excel 文件名（输出到词汇文件子目录下）
+# phase1: 从 PDF 提取词汇
+output_phase12: "result_phase12.xls"
+# phase4: 分流到拟上传/不上传
+output_phase4: "result_phase4.xls"
