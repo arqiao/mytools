@@ -41,12 +41,23 @@ def safe_filename(title: str) -> str:
 
 
 def setup_yitang_path(config):
-    """将 yitang/src 加入 sys.path"""
+    """将 yitang/src 加入 sys.path，并同步 credentials"""
     yitang_dir = Path(PROJECT_DIR / config.get("yitang_dir", "../yitang"))
     yitang_src = yitang_dir / "src"
     if str(yitang_src) not in sys.path:
         sys.path.insert(0, str(yitang_src))
+    sync_credentials_to_yitang(config)
     return yitang_dir
+
+
+def sync_credentials_to_yitang(config):
+    """同步 credentials 到 yitang，避免 refresh_token 不一致"""
+    import shutil
+    yitang_dir = Path(PROJECT_DIR / config.get("yitang_dir", "../yitang"))
+    src_cred = CFG_DIR / "credentials.yaml"
+    dst_cred = yitang_dir / "cfg" / "credentials.yaml"
+    if src_cred.exists() and dst_cred.exists():
+        shutil.copy2(str(src_cred), str(dst_cred))
 
 
 def download_wiki(wiki_url, output_dir, base_name):
@@ -188,6 +199,9 @@ def main():
         log.info(f"=== 任务 {i+1}/{len(tasks)} ===")
         title = get_task_title(task, config, creds)
         base_name = safe_filename(title)
+
+        # get_task_title 可能刷新了 token，再同步一次到 yitang
+        sync_credentials_to_yitang(config)
 
         # 下载教学文档
         wiki_url = task.get("wiki_url", "")
