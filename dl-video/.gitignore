@@ -1,0 +1,16 @@
+# 输出文件
+output/
+log-err/
+
+# 凭证
+cfg/credentials.yaml
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.specstory/
+.cursorindexingignore
+.claude/
+_todo_draft.md
