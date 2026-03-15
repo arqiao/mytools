@@ -4,23 +4,24 @@ API 流程:
   shortLink → getInviteMsg → inviteId
   inviteId  → getCourse    → 标题, thirdPartyId(VOD fileId), videoSource
   inviteId  → getLiveRoom  → liveRoomId
-  liveRoomId→ getVideoSign → appId, fileId, psign (DRM token)
-  psign     → 腾讯云 VOD m3u8 → ffmpeg 下载
-
-已知限制:
-  - 视频使用腾讯云 SimpleAES DRM (cipheredOverlayKey)
-  - ffmpeg/yt-dlp 无法直接解密 overlay 加密的 HLS
-  - 当前仅支持拿到 m3u8 地址，实际下载需要 DRM 方案突破或无 DRM 源
+  liveRoomId→ getVideoSign → appId, fileId, psign
+  psign     → getplayinfo/v4 (带自生成 overlay key) → drmToken
+  drmToken  → m3u8 → license → AES-CBC 解密 → 真正的 key → 下载并解密 ts
 """
 
+import base64
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
 
 import requests
 import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -43,6 +44,36 @@ log = logging.getLogger(__name__)
 PANDA_API = "https://fclive.pandacollege.cn/api"
 VOD_APPID = 1254019786  # 腾讯云 VOD appId（从 ts URL 路径确认）
 ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
+
+# 腾讯云 tcplayer 硬编码的 RSA 公钥（用于 SimpleAES DRM overlay 加密）
+RSA_PUB_KEY_B64 = (
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC3pDA7GTxOvNbXRGMi9QSIzQEI"
+    "+EMD1HcUPJSQSFuRkZkWo4VQECuPRg/xVjqwX1yUrHUvGQJsBwTS/6LIcQiSwYsO"
+    "qf+8TWxGQOJyW46gPPQVzTjNTiUoq435QB0v11lNxvKWBQIZLmacUZ2r1APta7i/M"
+    "Y4Lx9XlZVMZNUdUywIDAQAB"
+)
+CDN_HEADERS = {
+    "Origin": "https://fclive.pandacollege.cn",
+    "Referer": "https://fclive.pandacollege.cn/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+}
+
+
+def _find_ffmpeg():
+    """查找 ffmpeg 可执行文件路径"""
+    import shutil
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+    # Windows 常见安装位置
+    for candidate in [r"D:\tools\ffmpeg\bin\ffmpeg.exe",
+                      r"C:\tools\ffmpeg\bin\ffmpeg.exe"]:
+        if Path(candidate).exists():
+            return candidate
+    return "ffmpeg"  # fallback，让 FileNotFoundError 自然抛出
+
+
+FFMPEG = _find_ffmpeg()
 
 
 def safe_filename(title: str) -> str:
@@ -150,61 +181,175 @@ def get_video_sign(session, room_id: str) -> dict | None:
     return d["data"]
 
 
-def build_m3u8_url(psign: str, file_id: str, app_id: int = VOD_APPID) -> str:
-    """用 psign 构造腾讯云 VOD 的 getplayinfo 请求，获取 m3u8 地址
+def get_drm_playinfo(psign: str, file_id: str, app_id: int = VOD_APPID):
+    """用 psign + 自生成 overlay key 调用 getplayinfo/v4，返回解密所需的全部信息
 
-    TODO: 当 getVideoSign 可用时，从返回的 psign 构造播放地址。
-    目前的 DRM m3u8 URL 格式（从浏览器抓包确认）:
-      https://video.gzfeice.cn/{bucket}/{dir}{fileId}/
-        voddrm.token.{jwt_header}~{jwt_payload}~{jwt_sig}
-        .adp.{streamId}.m3u8?encdomain=cmv1&sign=xxx&t=xxx
+    Returns: (drm_url, drm_token, overlay_key, overlay_iv) 或 (None,...) 失败
     """
-    # 尝试腾讯云 VOD v4 API
+    # 1. 生成随机 overlay key/iv
+    overlay_key = os.urandom(16).hex()
+    overlay_iv = os.urandom(16).hex()
+
+    # 2. RSA 加密
+    pub_der = base64.b64decode(RSA_PUB_KEY_B64)
+    pub_key = serialization.load_der_public_key(pub_der)
+    enc_key = pub_key.encrypt(overlay_key.encode(), asym_padding.PKCS1v15()).hex()
+    enc_iv = pub_key.encrypt(overlay_iv.encode(), asym_padding.PKCS1v15()).hex()
+
+    # 3. 调用 getplayinfo/v4
     url = f"https://playvideo.qcloud.com/getplayinfo/v4/{app_id}/{file_id}"
-    params = {"psign": psign} if psign else {}
-    r = requests.get(url, params=params, timeout=15)
+    params = {
+        "psign": psign,
+        "cipheredOverlayKey": enc_key,
+        "cipheredOverlayIv": enc_iv,
+        "keyId": 1,
+    }
+    r = requests.get(url, params=params, headers=CDN_HEADERS, timeout=15)
     d = r.json()
     if d.get("code") != 0:
-        log.warning(f"VOD getplayinfo 失败: {d.get('message')}")
-        return ""
-    # 从返回的 streamingData 中提取 m3u8 URL
-    # TODO: 解析实际返回格式
-    return d.get("streamingData", {}).get("hlsUrl", "")
+        log.warning(f"getplayinfo 失败: code={d.get('code')}, {d.get('message')}")
+        return None, None, None, None
+
+    media = d.get("media", {})
+    streaming = media.get("streamingInfo", {})
+    drm_output = streaming.get("drmOutput", [])
+    drm_token = streaming.get("drmToken", "")
+
+    if not drm_output or not drm_token:
+        log.warning("getplayinfo 返回无 drmOutput 或 drmToken")
+        return None, None, None, None
+
+    drm_url = drm_output[0].get("url", "")
+    log.info(f"获取到 DRM 播放信息: type={drm_output[0].get('type')}")
+    return drm_url, drm_token, overlay_key, overlay_iv
 
 
-def download_m3u8_video(m3u8_url, output_path):
-    """用 ffmpeg 下载 HLS 视频（选最高分辨率）"""
+def get_real_aes_key(drm_url, drm_token, overlay_key, overlay_iv):
+    """从 m3u8 获取 license → 解密得到真正的 AES key 和 IV
+
+    Returns: (real_key_bytes, hls_iv_bytes, sub_m3u8_text, drm_url_base) 或 None
+    """
+    # 构造 master m3u8 URL
+    parts = drm_url.split("/")
+    parts[-1] = f"voddrm.token.{drm_token}.{parts[-1]}"
+    master_url = "/".join(parts)
+
+    r = requests.get(master_url, headers=CDN_HEADERS, timeout=15)
+    if r.status_code != 200:
+        log.warning(f"master m3u8 请求失败: {r.status_code}")
+        return None
+
+    # 选最高分辨率
+    streams = re.findall(
+        r"#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+)\n(.+)", r.text
+    )
+    if not streams:
+        log.warning("master m3u8 中无 STREAM-INF")
+        return None
+    best = streams[-1]
+    log.info(f"可用分辨率: {[s[0] for s in streams]}，选择 {best[0]}")
+
+    # 下载子 m3u8
+    base_url = "/".join(master_url.split("/")[:-1])
+    sub_url = f"{base_url}/{best[1].strip()}"
+    r = requests.get(sub_url, headers=CDN_HEADERS, timeout=15)
+    sub_text = r.text
+
+    # 提取 license URL 和 IV
+    key_m = re.search(r'#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"', sub_text)
+    iv_m = re.search(r"IV=0x([0-9a-fA-F]+)", sub_text)
+    if not key_m:
+        log.warning("子 m3u8 中无 EXT-X-KEY")
+        return None
+
+    # 获取 base key（被 overlay 加密的）
+    license_url = key_m.group(1)
+    r = requests.get(license_url, headers=CDN_HEADERS, timeout=15)
+    base_key = r.content
+    if len(base_key) != 16:
+        log.warning(f"license 返回异常: {len(base_key)} bytes")
+        return None
+
+    # AES-CBC 解密 base key → 真正的 key
+    ok = bytes.fromhex(overlay_key)
+    oiv = bytes.fromhex(overlay_iv)
+    dec = Cipher(algorithms.AES(ok), modes.CBC(oiv)).decryptor()
+    real_key = (dec.update(base_key) + dec.finalize())[:16]
+
+    hls_iv_hex = iv_m.group(1) if iv_m else "00000000000000000000000000000000"
+    hls_iv = bytes.fromhex(hls_iv_hex)
+
+    log.info(f"AES key 解密成功, HLS IV={hls_iv_hex[:16]}...")
+
+    # drm_url 的目录作为 ts 的 base URL
+    drm_url_base = "/".join(drm_url.split("/")[:-1])
+    return real_key, hls_iv, sub_text, drm_url_base
+
+
+def download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url,
+                       output_path):
+    """下载并解密所有 ts 分片，用 ffmpeg 合并为最终视频"""
     if output_path.exists():
         log.info(f"视频已存在，跳过: {output_path}")
         return True
-    if not m3u8_url:
-        log.warning("无 m3u8 URL，跳过视频下载")
+
+    # 提取所有 ts 分片 URL
+    segments = re.findall(r"\n(\d+_\d+_\d+\.ts[^\n]*)", sub_m3u8_text)
+    if not segments:
+        log.warning("m3u8 中无 ts 分片")
         return False
-    log.info(f"下载视频: {output_path.name}")
-    cmd = [
-        "ffmpeg",
-        "-headers", "Referer: https://fclive.pandacollege.cn/\r\n",
-        "-i", m3u8_url,
-        "-map", "0:p:2",  # 选第3个流（1080p，最高）
-        "-c", "copy",
-        str(output_path), "-y",
-    ]
+    log.info(f"共 {len(segments)} 个分片，开始下载解密...")
+
+    # 创建临时目录存放解密后的 ts
+    tmp_dir = output_path.parent / f"_tmp_{output_path.stem}"
+    tmp_dir.mkdir(exist_ok=True)
+    concat_list = tmp_dir / "concat.txt"
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace",
-                               timeout=3600)
-    except FileNotFoundError:
-        log.warning("ffmpeg 未安装或不在 PATH 中")
-        return False
-    except subprocess.TimeoutExpired:
-        log.error("ffmpeg 下载超时（1小时）")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg 下载失败: {result.stderr[-500:]}")
-        return False
-    size_mb = output_path.stat().st_size / 1024 / 1024
-    log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
-    return True
+        with open(concat_list, "w", encoding="utf-8") as flist:
+            for i, seg in enumerate(segments):
+                ts_url = f"{ts_base_url}/{seg}"
+                ts_path = tmp_dir / f"{i:05d}.ts"
+
+                if not ts_path.exists():
+                    r = requests.get(ts_url, headers=CDN_HEADERS, timeout=60)
+                    r.raise_for_status()
+                    # 解密
+                    cipher = Cipher(algorithms.AES(real_key), modes.CBC(hls_iv))
+                    dec = cipher.decryptor()
+                    decrypted = dec.update(r.content) + dec.finalize()
+                    ts_path.write_bytes(decrypted)
+
+                flist.write(f"file '{ts_path.resolve().as_posix()}'\n")
+
+                if (i + 1) % 200 == 0:
+                    log.info(f"  进度: {i+1}/{len(segments)}")
+
+        log.info(f"所有分片下载解密完成，ffmpeg 合并中...")
+
+        # ffmpeg concat 合并
+        cmd = [
+            FFMPEG, "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c", "copy", str(output_path), "-y",
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+        if result.returncode != 0:
+            log.error(f"ffmpeg 合并失败: {result.stderr[-500:]}")
+            return False
+
+        size_mb = output_path.stat().st_size / 1024 / 1024
+        log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
+        return True
+
+    finally:
+        # 清理临时文件
+        import shutil
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def extract_audio(video_path, audio_path):
@@ -217,7 +362,7 @@ def extract_audio(video_path, audio_path):
         return False
     log.info(f"提取音频: {audio_path.name}")
     cmd = [
-        "ffmpeg", "-i", str(video_path),
+        FFMPEG, "-i", str(video_path),
         "-vn", "-acodec", "libmp3lame", "-q:a", "2",
         str(audio_path), "-y",
     ]
@@ -270,24 +415,34 @@ def process_panda(task, config, creds):
 
     # 4. 获取 VOD 播放签名
     sign_data = get_video_sign(session, room_id)
-    if sign_data:
-        psign = sign_data.get("sign", "")
-        file_id = sign_data.get("fileId", course.get("thirdPartyId", ""))
-        app_id = sign_data.get("appId", VOD_APPID)
-        m3u8_url = build_m3u8_url(psign, file_id, app_id)
-    else:
-        log.warning("getVideoSign 失败，尝试用 thirdPartyId 直接构造")
-        m3u8_url = ""
+    if not sign_data:
+        log.warning("getVideoSign 失败，无法下载视频")
+        return
 
-    # 5. 下载视频
+    psign = sign_data.get("sign", "")
+    file_id = sign_data.get("fileId", course.get("thirdPartyId", ""))
+    app_id = sign_data.get("appId", VOD_APPID)
+
+    # 5. 获取 DRM 播放信息（带自生成 overlay key）
+    drm_url, drm_token, overlay_key, overlay_iv = get_drm_playinfo(
+        psign, file_id, app_id
+    )
+    if not drm_url:
+        log.warning("获取 DRM 播放信息失败")
+        return
+
+    # 6. 获取真正的 AES 解密 key
+    key_info = get_real_aes_key(drm_url, drm_token, overlay_key, overlay_iv)
+    if not key_info:
+        log.warning("获取 AES 解密 key 失败")
+        return
+    real_key, hls_iv, sub_m3u8_text, ts_base_url = key_info
+
+    # 7. 下载并解密视频
     video_path = output_dir / f"{base_name}.ts"
-    if m3u8_url:
-        download_m3u8_video(m3u8_url, video_path)
-    else:
-        log.warning("无法获取 m3u8 地址，跳过视频下载。"
-                    "可能原因: 视频已删除、DRM 限制、或 getVideoSign 参数不正确")
+    download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url, video_path)
 
-    # 6. 提取音频
+    # 8. 提取音频
     audio_path = output_dir / f"{base_name}.mp3"
     extract_audio(video_path, audio_path)
 
