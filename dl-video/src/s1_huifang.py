@@ -413,6 +413,9 @@ def main():
 
         if source_type == "feishu_minutes":
             process_feishu_minutes(task, config, creds)
+        elif source_type == "panda":
+            from s1_panda import process_panda
+            process_panda(task, config, creds)
         else:
             log.warning(f"暂不支持的视频源: {source_type}")
 

@@ -15,7 +15,7 @@ tasks:
   #   target_wiki_url: ""
 
   # - source_type: "panda"           # 熊猫学院
-  #   source_url: "https://fclive.pandacollege.cn/st-live/playback?param=qawkMB"
+  #   source_url: "https://fclive.pandacollege.cn/p/kXPTkP"
   #   wiki_url: ""
   #   target_wiki_url: ""
 
@@ -31,3 +31,4 @@ llm:
     base_url: "https://api.minimax.chat/v1"
     max_tokens: 8192
     temperature: 0.3
+
