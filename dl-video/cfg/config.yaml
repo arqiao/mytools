@@ -3,26 +3,34 @@ yitang_dir: "../yitang"
 
 # 回放任务列表 — 支持多种视频源
 tasks:
-  - source_type: "feishu_minutes"    # 飞书妙记
-    source_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
-    wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
-    target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
-    # title: ""                       # 可选，手动指定标题（留空则自动获取）
+  # - source_type: "feishu_minutes"    # 飞书妙记
+  #   source_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
+  #   wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
+  #   target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   # - source_type: "zhihu"           # 知乎训练营
   #   source_url: "https://www.zhihu.com/xen/market/training/training-video/2013216469425603157/2013217221053268327"
   #   wiki_url: ""
   #   target_wiki_url: ""
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   # - source_type: "panda"           # 熊猫学院
-  #   source_url: "https://fclive.pandacollege.cn/p/kXPTkP"
-  #   wiki_url: ""
+  #   source_url: "https://fclive.pandacollege.cn/p/9nubG3"
+  #   wiki_url: "https://forchangesz.feishu.cn/wiki/AbsEw9BrEiROVzkelv8cTelInfd"
   #   target_wiki_url: ""
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+
+  - source_type: "xiaoe"            # 小鹅通
+    source_url: "https://appsbkkqmgs9185.h5.xiaoecloud.com/p/course/video/v_68bbfc7ce4b0694c5b269573"
+    wiki_url: ""
+    target_wiki_url: ""
 
   # - source_type: "taobao"          # 淘宝直播
-  #   source_url: "https://81025.tbkflow.cn/pcLive/c5618126e2280251b941e631bb95040fa64c0?f=eGGppGGy"
+  #   source_url: "https://81025.tbkflow.cn/pcLive/980e81dbbe10025fb8d7da8e63ec472f07a1a?f=eccxpIGJ"
   #   wiki_url: ""
   #   target_wiki_url: ""
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
 llm:
   provider: "minimax"

@@ -165,25 +165,44 @@ def get_minutes_media(token, cookie, session, source_url):
 
 
 def download_video(video_url, output_path, cookie):
-    """下载视频（飞书内部流式 API，需要 cookie 认证）"""
+    """下载视频（飞书内部流式 API，需要 cookie 认证）。支持断点续传。"""
     if not video_url:
         log.warning("无视频 URL，跳过视频下载")
         return False
-    if output_path.exists():
-        log.info(f"视频已存在，跳过: {output_path}")
-        return True
-    log.info(f"下载视频: {output_path.name}")
+
+    # 已有文件大小（续传起点）
+    existing_size = output_path.stat().st_size if output_path.exists() else 0
+
+    # 先 HEAD 请求获取完整文件大小，判断是否已下载完成
     headers = {
         "Cookie": cookie,
         "Referer": "https://waytoagi.feishu.cn/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Range": "bytes=0-",
     }
+    if existing_size > 0:
+        head_resp = requests.head(video_url, headers=headers, timeout=15)
+        total = int(head_resp.headers.get("content-length", 0))
+        if total > 0 and existing_size >= total:
+            log.info(f"视频已下载完成，跳过: {output_path}")
+            return True
+        log.info(f"续传: 已有 {existing_size / 1024 / 1024:.1f} / "
+                 f"{total / 1024 / 1024:.1f} MB")
+
+    log.info(f"下载视频: {output_path.name}")
+    headers["Range"] = f"bytes={existing_size}-"
     resp = requests.get(video_url, headers=headers, stream=True, timeout=60)
     resp.raise_for_status()
-    total = int(resp.headers.get("content-length", 0))
-    downloaded = 0
-    with open(output_path, "wb") as f:
+
+    # 206 Partial Content = 续传成功，200 = 服务器不支持 Range，从头下载
+    if resp.status_code == 200 and existing_size > 0:
+        log.info("服务器不支持 Range，从头下载")
+        existing_size = 0
+
+    total = existing_size + int(resp.headers.get("content-length", 0))
+    downloaded = existing_size
+    mode = "ab" if resp.status_code == 206 else "wb"
+
+    with open(output_path, mode) as f:
         for chunk in resp.iter_content(chunk_size=65536):
             f.write(chunk)
             downloaded += len(chunk)
@@ -305,6 +324,55 @@ def get_transcript(token, user_token, session, output_dir, base_name):
         log.warning("文字记录为空")
         return False
 
+    return _save_transcript(paragraphs, output_dir, base_name, source="open_api")
+
+
+def get_transcript_by_cookie(token, cookie, session, source_url,
+                             output_dir, base_name):
+    """Cookie API 获取文字记录（跨租户 fallback）"""
+    m = re.match(r"(https://[^/]+)", source_url)
+    base_domain = m.group(1) if m else "https://waytoagi.feishu.cn"
+
+    url = f"{base_domain}/minutes/api/subtitles"
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": f"{base_domain}/minutes/{token}",
+    }
+    resp = session.get(url, params={"object_token": token, "size": 500},
+                       headers=headers, timeout=30)
+    data = resp.json()
+    if data.get("code") != 0:
+        log.warning(f"Cookie API 获取文字记录失败: code={data.get('code')}")
+        return False
+
+    paragraphs = data.get("data", {}).get("paragraphs", [])
+    if not paragraphs:
+        log.warning("Cookie API 文字记录为空")
+        return False
+
+    # Cookie API 的 paragraph 结构：sentences[].contents[].content
+    normalized = []
+    for p in paragraphs:
+        sentences = p.get("sentences", [])
+        parts = []
+        for s in sentences:
+            contents = s.get("contents", [])
+            parts.extend(c.get("content", "") for c in contents)
+        text = "".join(parts)
+        normalized.append({
+            "speaker": {"user_name": p.get("speaker", {}).get("user_name", "")},
+            "text": text,
+            "start_time": p.get("start_time", 0),
+            "end_time": p.get("stop_time", 0),
+        })
+
+    log.info(f"Cookie API 获取到 {len(normalized)} 条文字记录")
+    return _save_transcript(normalized, output_dir, base_name, source="cookie_api")
+
+
+def _save_transcript(paragraphs, output_dir, base_name, source=""):
+    """保存文字记录为 _ori.md 和 _ori.srt"""
     # 生成 _ori.md（带说话人的文字记录）
     md_lines = []
     for p in paragraphs:
@@ -314,7 +382,7 @@ def get_transcript(token, user_token, session, output_dir, base_name):
 
     md_path = output_dir / f"{base_name}_ori.md"
     md_path.write_text("\n\n".join(md_lines), encoding="utf-8")
-    log.info(f"文字记录已保存: {md_path}")
+    log.info(f"文字记录已保存({source}): {md_path}")
 
     # 仅在没有 _ori.srt 时才从 transcript 生成 SRT
     srt_path = output_dir / f"{base_name}_ori.srt"
@@ -390,12 +458,22 @@ def process_feishu_minutes(task, config, creds):
     # 下载 VTT 字幕并转为 SRT
     download_vtt_subtitle(vtt_url, output_dir, base_name, cookie)
 
-    # 获取文字记录（Open API，可能失败）
+    # 获取文字记录：Open API 优先，失败则 fallback Cookie API
+    got_transcript = False
     try:
         user_token = ensure_feishu_token(creds, session)
-        get_transcript(token, user_token, session, output_dir, base_name)
+        got_transcript = get_transcript(
+            token, user_token, session, output_dir, base_name)
     except Exception as e:
-        log.warning(f"获取文字记录失败: {e}")
+        log.warning(f"Open API 获取文字记录失败: {e}")
+
+    if not got_transcript and cookie:
+        log.info("尝试 Cookie API 获取文字记录...")
+        try:
+            got_transcript = get_transcript_by_cookie(
+                token, cookie, session, source_url, output_dir, base_name)
+        except Exception as e:
+            log.warning(f"Cookie API 获取文字记录失败: {e}")
 
     log.info(f"飞书妙记处理完成: {base_name}")
 
@@ -416,6 +494,12 @@ def main():
         elif source_type == "panda":
             from s1_panda import process_panda
             process_panda(task, config, creds)
+        elif source_type == "taobao":
+            from s1_taobao import process_taobao
+            process_taobao(task, config, creds)
+        elif source_type == "xiaoe":
+            from s1_xiaoe import process_xiaoe
+            process_xiaoe(task, config, creds)
         else:
             log.warning(f"暂不支持的视频源: {source_type}")
 
