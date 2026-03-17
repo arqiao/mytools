@@ -85,25 +85,79 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str]:
     from playwright.sync_api import sync_playwright
     import time as _time
 
+    # 小鹅通常见域名后缀，cookie 需要设在这些域名上
+    XIAOE_DOMAINS = [".xiaoecloud.com", ".xiaoeknow.com", ".xiaoe-tech.com",
+                     ".xet.citv.cn"]
+
+    def _make_cookies(cookie_str, domain=None):
+        """为指定域名生成 cookie 列表"""
+        cookies = []
+        for part in cookie_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                cookie = {"name": name.strip(), "value": value.strip(), "path": "/"}
+                if domain:
+                    cookie["domain"] = domain
+                cookies.append(cookie)
+        return cookies
+
     domain = urlparse(page_url).netloc
-    cookies = []
-    for part in cookie_str.split(";"):
-        part = part.strip()
-        if "=" in part:
-            name, _, value = part.partition("=")
-            cookies.append({"name": name.strip(), "value": value.strip(),
-                             "domain": domain, "path": "/"})
     m3u8_found = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context()
-        ctx.add_cookies(cookies)
+
+        # 提取 app_id（如 appsbkkqmgs9185），为所有小鹅通域名预设 cookie
+        app_id_match = re.search(r'(app\w+)\.h5\.', domain)
+        if app_id_match:
+            app_id = app_id_match.group(1)
+        else:
+            app_id = "appsbkkqmgs9185"  # fallback
+        all_domains = [domain]
+        for suffix in XIAOE_DOMAINS:
+            d = f"{app_id}.h5{suffix}"
+            if d not in all_domains:
+                all_domains.append(d)
+        for d in all_domains:
+            ctx.add_cookies(_make_cookies(cookie_str, d))
+
         page = ctx.new_page()
         page.on("request", lambda req: m3u8_found.append(req.url)
                 if ".m3u8" in req.url else None)
-        page.goto(page_url, timeout=30000)
-        _time.sleep(6)
+        page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
+
+        # 检查是否跳转到登录页，若是则从 URL 提取 app_id 并补充 cookie
+        if "/login/auth" in page.url:
+            redirect_match = re.search(r'redirect_url=([^&]+)', page.url)
+            if redirect_match:
+                import urllib.parse
+                redirect_url = urllib.parse.unquote(redirect_match.group(1))
+                app_id_match = re.search(r'(app\w+)\.h5\.', redirect_url)
+                if app_id_match:
+                    real_app_id = app_id_match.group(1)
+                    log.info(f"登录跳转，补充 {real_app_id} 的 cookie")
+                    for suffix in XIAOE_DOMAINS:
+                        ctx.add_cookies(_make_cookies(cookie_str,
+                                                      f"{real_app_id}.h5{suffix}"))
+                    # 直接导航到目标页面
+                    page.goto(redirect_url, timeout=30000,
+                              wait_until="domcontentloaded")
+
+        # 等待 SPA 加载视频播放器
+        _time.sleep(12)
+
+        final_url = page.url
+        log.info(f"页面 URL: {final_url}")
+        try:
+            content = page.content()
+            log.info(f"页面内容长度: {len(content)}")
+            if "登录" in content[:2000]:
+                log.warning("检测到登录页面")
+        except Exception:
+            log.warning("页面仍在加载，跳过内容检查")
+
         title = page.title().strip()
         browser.close()
 
@@ -195,10 +249,22 @@ def download_and_decrypt_segments(ts_urls: list[str], aes_key: bytes,
 
     with open(output_ts, "wb") as out:
         for i, url in enumerate(ts_urls):
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code != 200:
-                log.error(f"分片 {i}/{total} 下载失败: status={resp.status_code}")
-                return False
+            # 重试机制：最多 3 次
+            for attempt in range(3):
+                try:
+                    resp = requests.get(url, headers=headers, timeout=30)
+                    if resp.status_code != 200:
+                        log.error(f"分片 {i}/{total} 下载失败: status={resp.status_code}")
+                        return False
+                    break
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    if attempt < 2:
+                        import time as _t
+                        _t.sleep(2 * (attempt + 1))
+                        log.warning(f"分片 {i} 重试 {attempt+1}/3: {e}")
+                    else:
+                        log.error(f"分片 {i} 下载失败（已重试3次）: {e}")
+                        return False
             # AES-128-CBC 解密
             cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
             decryptor = cipher.decryptor()
@@ -212,6 +278,34 @@ def download_and_decrypt_segments(ts_urls: list[str], aes_key: bytes,
                 log.info(f"  进度: {i+1}/{total}")
     size_mb = output_ts.stat().st_size / 1024 / 1024
     log.info(f"TS 合并完成: {output_ts} ({size_mb:.1f} MB)")
+    return True
+
+
+def ffmpeg_download_hls(m3u8_url: str, referer: str, output_path: Path) -> bool:
+    """ffmpeg 直接下载无加密 HLS 流"""
+    if output_path.exists() and output_path.stat().st_size > 1024:
+        log.info(f"视频已存在，跳过: {output_path}")
+        return True
+    log.info(f"ffmpeg 下载 HLS（无加密）: {output_path.name}")
+    cmd = [
+        FFMPEG,
+        "-headers", f"Referer: {referer}\r\nOrigin: {referer.rstrip('/')}\r\n",
+        "-i", m3u8_url,
+        "-c", "copy", "-bsf:a", "aac_adtstoasc",
+        str(output_path), "-y",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
+                                timeout=1800)
+    except FileNotFoundError:
+        log.error("ffmpeg 未安装")
+        return False
+    if result.returncode != 0:
+        log.error(f"ffmpeg HLS 下载失败: {result.stderr[-500:]}")
+        return False
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    log.info(f"HLS 下载完成: {output_path} ({size_mb:.1f} MB)")
     return True
 
 
@@ -313,25 +407,27 @@ def process_xiaoe(task, config, creds):
     # 2. 下载 m3u8
     m3u8_text = download_m3u8(m3u8_url, referer)
 
-    # 3. 获取 AES 密钥
-    key_match = re.search(r'URI="([^"]+)"', m3u8_text)
-    if not key_match:
-        raise RuntimeError("m3u8 中未找到 EXT-X-KEY URI")
-    aes_key = fetch_aes_key(key_match.group(1))
-
-    # 4. 确定文件名
+    # 3. 确定文件名
     if not title:
         fid_match = re.search(r'fileId=(\d+)', m3u8_text)
         title = f"xiaoe_{fid_match.group(1)}" if fid_match else "xiaoe_video"
         log.warning(f"标题为空，使用默认名: {title}")
     base_name = safe_filename(title)
-
-    # 5. 下载 + 解密 + remux
     video_path = OUTPUT_DIR / f"{base_name}.mp4"
-    if not download_video(m3u8_text, m3u8_url, aes_key, referer, video_path):
-        log.error("视频下载失败")
-        return
 
-    # 6. 提取音频
+    # 4. 下载视频：有 AES 加密则手动解密，否则 ffmpeg 直接下载
+    key_match = re.search(r'URI="([^"]+)"', m3u8_text)
+    if key_match:
+        aes_key = fetch_aes_key(key_match.group(1))
+        if not download_video(m3u8_text, m3u8_url, aes_key, referer, video_path):
+            log.error("视频下载失败")
+            return
+    else:
+        log.info("无 AES 加密，使用 ffmpeg 直接下载")
+        if not ffmpeg_download_hls(m3u8_url, referer, video_path):
+            log.error("视频下载失败")
+            return
+
+    # 5. 提取音频
     extract_audio(video_path, OUTPUT_DIR / f"{base_name}.mp3")
     log.info(f"小鹅通视频处理完成: {base_name}")
