@@ -11,6 +11,10 @@
 - **yitang_video.py** — 视频/音频/讨论区下载
 - **subtitle_from_mp3.py** — 音频转字幕（多引擎，Whisper 支持 CUDA 加速）
 - **model_downloader.py** — Whisper 模型下载管理（HuggingFace 镜像加速）
+- **yitang_srt_fix.py** — 字幕校订（LLM + 逐字稿参考 + 词典替换）
+- **filter_changelog.py** — 字幕校订后处理过滤器
+- **url2md.py** — 飞书/一堂文档 URL → 本地 Markdown 导出
+- **go-newlesson.py** — 新课一键处理（串联 wiki→video→subtitle→NAS）
 
 ## 2. 工具一：文档复制（yitang_wiki.py）
 
@@ -80,6 +84,13 @@
 - 批量写入失败时降级为逐个 block 写入
 - 断点恢复：通过 `--resume` 参数从上次中断位置继续
 - 飞书 user_access_token 过期自动刷新
+- `start_heading` 找不到时自动 fallback 全文复制
+- mapping 支持 `full_copy: true` 跳过章节过滤
+
+### 2.7 本地 Markdown 导出
+
+- 写入飞书的同时，自动以文档标题导出本地 md 文件到 `localscript/` 目录
+- 文件名取文档标题（去除特殊字符），如 `AI落地Live_069.md`
 
 ## 3. 工具二：视频/音频/讨论区下载（yitang_video.py）
 
@@ -118,6 +129,7 @@
 | 引擎 | 参数 | 说明 |
 |------|------|------|
 | Whisper | `--whisper` | 本地模型，默认 medium，可选 tiny/small/large；自动检测 CUDA 加速 |
+| Whisper CPU | `--cpu` | 强制 CPU 模式（GPU 显存不足时使用） |
 | 讯飞 | `--xunfei` | 讯飞开放平台 API |
 | 阿里云 | `--aliyun` | 阿里云智能语音 API |
 | 豆包 | `--doubao` | 火山引擎 API |
@@ -141,9 +153,106 @@
 - oss2（阿里云引擎）
 - 各引擎的 API 凭证配置在 credentials.yaml 中
 
-## 5. 技术架构
+## 5. 工具四：字幕校订（yitang_srt_fix.py）
 
-### 5.1 文档复制数据流
+### 5.1 功能
+
+基于 LLM + 逐字稿参考 + 自定义词典，纠正 Whisper 字幕中的语音识别错误。
+
+### 5.2 处理流程
+
+```
+原始 SRT ──→ 解析字幕条目
+                │
+          apply_dict_fixes()
+          └─ 第一轮：自定义词典字符串替换（srtfix-dict.yaml）
+                │
+          run_llm_fix()
+          ├─ 加载逐字稿（无/本地文件/飞书URL 三种模式）
+          ├─ 提取专有名词（英文词、引号术语）
+          ├─ 分段（每段 80 条）送 LLM 纠正
+          ├─ 实时缓存分段结果（断点续传）
+          └─ 第二轮：LLM 返回 JSON 修正列表
+                │
+          apply_llm_fixes()
+          └─ 将修正应用到字幕条目
+                │
+          输出 _fix.srt + _fix_changelog.md
+```
+
+### 5.3 LLM 校订策略
+
+- 提示词区分有参照（`prompt-srtfix-ref.md`）和无参照（`prompt-srtfix-noref.md`）两种模式
+- 有参照模式：对照逐字稿，只纠正"听错的字"（同音字、专有名词、乱码），不做口语优化
+- 无参照模式：仅纠正明显的专有名词和同音字错误
+- 课程领域知识内嵌提示词（龙虾=OpenClaw、一堂=平台名等）
+
+### 5.4 后处理过滤（filter_changelog.py）
+
+LLM 即使在提示词中明确禁止，仍可能过度纠正（删语气词、口语书面化等）。`filter_changelog.py` 按关键词列表过滤这类条目，输出 `_filtered.md` 供人工复核。
+
+### 5.5 配置
+
+| 文件 | 说明 |
+|------|------|
+| `config-srtfix.yaml` | 输入文件、LLM provider/model、输出目录、chunk_size |
+| `prompt-srtfix-ref.md` | 有逐字稿参照的提示词 |
+| `prompt-srtfix-noref.md` | 无逐字稿参照的提示词 |
+| `srtfix-dict.yaml` | 自定义纠正词典（错误: 正确） |
+
+## 6. 工具五：文档导出（url2md.py）
+
+### 6.1 功能
+
+将飞书/一堂文档 URL 导出为本地 Markdown 文件。复用 `YitangCopier` 的 block 解析和 `_block_to_md` 转换能力。
+
+### 6.2 支持的 URL 格式
+
+| 格式 | 示例 |
+|------|------|
+| 飞书 docx | `https://xxx.feishu.cn/docx/{doc_token}` |
+| 飞书 wiki | `https://xxx.feishu.cn/wiki/{wiki_token}` |
+| 一堂 fs-doc | `https://yitang.top/fs-doc/{acl}/{doc_token}` |
+
+### 6.3 运行参数
+
+| 参数 | 说明 |
+|------|------|
+| `url`（位置参数） | 飞书/一堂文档 URL |
+| `-o, --output` | 输出文件路径（默认保存到 `localscript/`） |
+
+## 7. 工具六：新课一键处理（go-newlesson.py）
+
+### 7.1 功能
+
+串联多个工具完成新课的完整处理流程。修改脚本顶部 CONFIG 区后直接运行。
+
+### 7.2 处理步骤
+
+1. 更新 `config-wiki.yaml` → 运行 `yitang_wiki.py`（写入 wiki + 生成本地 md）
+2. 更新 `config-video.yaml` → 运行 `yitang_video.py`（下载视频/音频/讨论区）
+3. 重命名 md 文件与视频文件名一致
+4. 运行 `subtitle_from_mp3.py` 生成字幕
+5. 移动 ts/mp3 到 NAS 目录
+
+### 7.3 失败通知
+
+任一步骤失败时，通过飞书 IM API 发送文本消息到指定群聊，包含失败步骤和回放 URL。
+
+### 7.4 CONFIG 配置项
+
+| 字段 | 说明 |
+|------|------|
+| `transcript_url` | 课程逐字稿 URL（飞书/一堂） |
+| `replay_url` | 课程回放 URL |
+| `target_wiki_url` | 飞书 wiki 目标写入地址 |
+| `start_heading` / `end_heading` | 内容过滤起止标题（留空则全文复制） |
+| `heading_number_start` | 标题自动编号起始（留空则不编号） |
+| `nas_dir` | NAS 目标目录 |
+
+## 8. 技术架构
+
+### 8.1 文档复制数据流
 
 ```
 一堂 API ──(AES加密)──→ 解密 ──→ Block 树
@@ -171,7 +280,7 @@
                               飞书 Open API ──→ 目标文档
 ```
 
-### 5.2 认证
+### 8.2 认证
 
 **一堂侧：**
 - Cookie 认证
@@ -181,19 +290,29 @@
 **飞书侧：**
 - OAuth 2.0 user_access_token（2 小时有效期，自动刷新）
 
-### 5.3 文件结构
+### 8.3 文件结构
 
 ```
 yitang/
 ├── src/
 │   ├── yitang_wiki.py       # 文档复制主程序
 │   ├── yitang_video.py      # 视频/音频/讨论区下载
+│   ├── yitang_addon.py      # 讨论区精华提取（LLM）
 │   ├── subtitle_from_mp3.py # 音频转字幕（多引擎）
 │   ├── model_downloader.py  # Whisper 模型下载管理
+│   ├── yitang_srt_fix.py    # 字幕校订（LLM + 词典）
+│   ├── filter_changelog.py  # 校订后处理过滤器
+│   ├── url2md.py            # 文档 URL → Markdown 导出
+│   ├── go-newlesson.py      # 新课一键处理
 │   └── auth.py              # 飞书 OAuth 授权辅助
 ├── cfg/
 │   ├── config-wiki.yaml     # 文档复制配置（源→目标映射、章节范围）
 │   ├── config-video.yaml    # 视频下载配置
+│   ├── config-addon.yaml    # 讨论区精华提取配置
+│   ├── config-srtfix.yaml   # 字幕校订配置
+│   ├── prompt-srtfix-ref.md # 校订提示词（有逐字稿参照）
+│   ├── prompt-srtfix-noref.md # 校订提示词（无逐字稿参照）
+│   ├── srtfix-dict.yaml     # 字幕校订自定义词典
 │   └── credentials.yaml     # 敏感凭证（不入库）
 ├── docs/
 │   ├── PRD.md               # 本文档
@@ -202,14 +321,17 @@ yitang/
 ├── log-err/                 # 运行日志 + 跳过记录
 │   ├── yitang_wiki.log      # 文档复制日志
 │   ├── subtitle.log         # 字幕转写日志
+│   ├── srtfix.log           # 字幕校订日志
+│   ├── url2md.log           # 文档导出日志
 │   ├── model_download.log   # 模型下载日志（仅独立运行时）
 │   └── skipped_*.log        # 跳过内容记录
 ├── ailive/                  # 视频/音频/字幕下载目录
+├── localscript/             # 本地导出文件目录（md、校订后 srt）
 ├── temp_images/             # 图片下载临时目录
 └── .progress_*.json         # 断点恢复进度文件（运行中生成，完成后自动删除）
 ```
 
-### 5.4 配置文件格式
+### 8.4 配置文件格式
 
 **config-wiki.yaml**（文档复制配置）：
 ```yaml
@@ -246,7 +368,7 @@ feishu:
   user_token_expire_time: 1772914991
 ```
 
-## 6. 已知限制
+## 9. 已知限制
 
 - 一堂 Cookie/Token 有效期未知，过期需手动从浏览器重新获取
 - 飞书 Grid 最多 5 列，超过自动拆分为多个 Grid（布局可能与原文略有差异）
@@ -257,7 +379,7 @@ feishu:
 - 图片从 CDN 下载后重新上传，不保留原始飞书 token 引用
 - 飞书 refresh_token 有效期约 30 天，过期需重新 OAuth 授权
 
-## 7. 依赖
+## 10. 依赖
 
 - Python 3.10+
 - requests, cryptography, pyyaml, opencc-python-reimplemented（核心）

@@ -5,7 +5,7 @@ input:
   # 逐字稿本地文件（从飞书导出的 md/txt）
   transcript: "https://arqiaoknow.feishu.cn/wiki/Z1i7witDZiX4YpkoH6kcHzFNnNF"
   # 字幕文件（.srt 格式）
-  subtitle: "AI落地Live_069_wm.srt"
+  subtitle: "Live245_情报调研第一课_wm.srt"
   # 讨论区文件（.xlsx 格式，yitang_video.py --chat 导出）
   discussion: "Live245_情报调研第一课.xlsx"
 

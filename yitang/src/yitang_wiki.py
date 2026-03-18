@@ -512,6 +512,11 @@ class YitangCopier:
             if end_found and btype in HEADING_TYPES:
                 result.pop()  # 移除下一章节的标题
                 break
+
+        # start_heading 找不到时 fallback 到全文复制
+        if not result:
+            log.warning(f"  未找到 start_heading '{start_kw}'，fallback 到全文复制")
+            return flat
         return result
 
     # ── Block 转换 ────────────────────────────────────────
@@ -1699,7 +1704,7 @@ class YitangCopier:
 
                 # 2. 过滤内容范围（飞书原始文档直接全文复制）
                 is_feishu = self._is_feishu_url(source_url)
-                if is_feishu:
+                if is_feishu or m.get("full_copy", False):
                     root_block = blocks_data.get("blocks", {})
                     filtered = self._flatten_blocks(root_block)
                 else:
@@ -1749,12 +1754,19 @@ class YitangCopier:
                     self.append_to_feishu(doc_id, converted)
                     log.info(f"  写入完成!")
 
-                # 5.5 本地导出 Markdown（如果配置了 local_export）
+                # 5.5 本地导出 Markdown
+                # 优先用 mapping 中手动配置的 local_export 文件名
+                # 否则自动以文档标题为文件名
+                export_dir = self.config.get("local_export_dir", "localscript")
                 export_name = m.get("local_export", "")
+                if not export_name and doc_title:
+                    # 过滤文件名中的非法字符
+                    safe_title = re.sub(r'[\\/:*?"<>|]', "_", doc_title).strip()
+                    export_name = f"{safe_title}.md"
                 if export_name:
-                    export_dir = self.config.get("local_export_dir", "localscript")
                     export_path = Path(export_dir) / export_name
                     self.export_local_md(filtered, str(export_path), doc_title)
+                    log.info(f"  本地 MD 已导出: {export_path}")
 
                 # 6. 记录跳过的 blocks
                 self._write_skip_log(doc_title, source_url)

@@ -288,7 +288,11 @@ def get_real_aes_key(drm_url, drm_token, overlay_key, overlay_iv):
 
 def download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url,
                        output_path):
-    """下载并解密所有 ts 分片，用 ffmpeg 合并为最终视频"""
+    """下载并解密所有 ts 分片，用 ffmpeg 合并为最终视频。
+
+    支持续传：中断后重新运行，已解密的分片会被跳过。
+    临时目录仅在合并成功后清理。
+    """
     if output_path.exists():
         log.info(f"视频已存在，跳过: {output_path}")
         return True
@@ -298,58 +302,66 @@ def download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url,
     if not segments:
         log.warning("m3u8 中无 ts 分片")
         return False
-    log.info(f"共 {len(segments)} 个分片，开始下载解密...")
 
     # 创建临时目录存放解密后的 ts
     tmp_dir = output_path.parent / f"_tmp_{output_path.stem}"
     tmp_dir.mkdir(exist_ok=True)
+
+    # 统计已有分片（续传）
+    existing = sum(1 for i in range(len(segments))
+                   if (tmp_dir / f"{i:05d}.ts").exists())
+    if existing > 0:
+        log.info(f"续传: 已有 {existing}/{len(segments)} 个分片，"
+                 f"继续下载剩余 {len(segments) - existing} 个...")
+    else:
+        log.info(f"共 {len(segments)} 个分片，开始下载解密...")
+
+    # 下载并解密分片
+    downloaded = 0
+    for i, seg in enumerate(segments):
+        ts_path = tmp_dir / f"{i:05d}.ts"
+        if not ts_path.exists():
+            ts_url = f"{ts_base_url}/{seg}"
+            r = requests.get(ts_url, headers=CDN_HEADERS, timeout=60)
+            r.raise_for_status()
+            cipher = Cipher(algorithms.AES(real_key), modes.CBC(hls_iv))
+            dec = cipher.decryptor()
+            decrypted = dec.update(r.content) + dec.finalize()
+            ts_path.write_bytes(decrypted)
+            downloaded += 1
+
+        if (i + 1) % 200 == 0:
+            log.info(f"  进度: {i+1}/{len(segments)}")
+
+    log.info(f"所有分片就绪（本次下载 {downloaded} 个），ffmpeg 合并中...")
+
+    # 生成 concat 列表并合并
     concat_list = tmp_dir / "concat.txt"
+    with open(concat_list, "w", encoding="utf-8") as flist:
+        for i in range(len(segments)):
+            ts_path = tmp_dir / f"{i:05d}.ts"
+            flist.write(f"file '{ts_path.resolve().as_posix()}'\n")
 
-    try:
-        with open(concat_list, "w", encoding="utf-8") as flist:
-            for i, seg in enumerate(segments):
-                ts_url = f"{ts_base_url}/{seg}"
-                ts_path = tmp_dir / f"{i:05d}.ts"
+    cmd = [
+        FFMPEG, "-f", "concat", "-safe", "0",
+        "-i", str(concat_list),
+        "-c", "copy", str(output_path), "-y",
+    ]
+    result = subprocess.run(
+        cmd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=600,
+    )
+    if result.returncode != 0:
+        log.error(f"ffmpeg 合并失败: {result.stderr[-500:]}")
+        return False
 
-                if not ts_path.exists():
-                    r = requests.get(ts_url, headers=CDN_HEADERS, timeout=60)
-                    r.raise_for_status()
-                    # 解密
-                    cipher = Cipher(algorithms.AES(real_key), modes.CBC(hls_iv))
-                    dec = cipher.decryptor()
-                    decrypted = dec.update(r.content) + dec.finalize()
-                    ts_path.write_bytes(decrypted)
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
 
-                flist.write(f"file '{ts_path.resolve().as_posix()}'\n")
-
-                if (i + 1) % 200 == 0:
-                    log.info(f"  进度: {i+1}/{len(segments)}")
-
-        log.info(f"所有分片下载解密完成，ffmpeg 合并中...")
-
-        # ffmpeg concat 合并
-        cmd = [
-            FFMPEG, "-f", "concat", "-safe", "0",
-            "-i", str(concat_list),
-            "-c", "copy", str(output_path), "-y",
-        ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=600,
-        )
-        if result.returncode != 0:
-            log.error(f"ffmpeg 合并失败: {result.stderr[-500:]}")
-            return False
-
-        size_mb = output_path.stat().st_size / 1024 / 1024
-        log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
-        return True
-
-    finally:
-        # 清理临时文件
-        import shutil
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+    # 合并成功后才清理临时文件
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return True
 
 
 def extract_audio(video_path, audio_path):

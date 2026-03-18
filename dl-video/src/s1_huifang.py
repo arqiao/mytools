@@ -52,7 +52,7 @@ def main():
         log.info(f"=== 任务 {i+1}/{len(tasks)}: {source_type} ===")
 
         if source_type == "feishu_minutes":
-            from s1_feishu import process_feishu_minutes
+            from s1_feishumiaoji import process_feishu_minutes
             process_feishu_minutes(task, config, creds)
         elif source_type == "panda":
             from s1_panda import process_panda

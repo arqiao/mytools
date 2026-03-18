@@ -1,0 +1,59 @@
+# yitang_srt_fix 配置 — 字幕校订工具
+
+# 输入文件
+input:
+  # # 原始 SRT 字幕文件
+  # subtitle: "AI落地Live_070_wm.srt"
+  # # 逐字稿（作为参考，可选）。支持本地文件路径或飞书 URL
+  # transcript: "https://arqiaoknow.feishu.cn/wiki/OPsEwUljAiYIpGkhTLgcAiXPnWc"
+
+  # # 原始 SRT 字幕文件
+  # subtitle: "AI落地Live_069_wm.srt"
+  # # 逐字稿（作为参考，可选）。支持本地文件路径或飞书 URL
+  # transcript: "https://arqiaoknow.feishu.cn/wiki/Nce9wZEeHiuJhtkclNgclSJKnhg"
+
+  # 原始 SRT 字幕文件
+  subtitle: "Live245_情报调研第一课_wm.srt"
+  # 逐字稿（作为参考，可选）。支持本地文件路径或飞书 URL
+  transcript: "https://yitang.top/fs-doc/c625f36d3f91712f021d5bfbc47e7ae1/SCaodfwWnomwojxHxKocInkun1x"
+
+# LLM 配置（复用 addon 的 provider 体系）
+llm:
+  provider: "minimax"
+  minimax:
+    model: "MiniMax-Text-01"
+    base_url: "https://api.minimax.chat/v1"
+    max_tokens: 8192
+    temperature: 0.2
+  volcengine:
+    model: "doubao-1.5-pro-256k"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    max_tokens: 8192
+    temperature: 0.2
+  dashscope:
+    model: "qwen-max"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    max_tokens: 8192
+    temperature: 0.2
+  deepseek:
+    model: "deepseek-chat"
+    base_url: "https://api.deepseek.com/v1"
+    max_tokens: 8192
+    temperature: 0.2
+
+# 输出配置
+output:
+  dir: "localscript"
+  # 修正后的 SRT 文件后缀，如原文件 xxx.srt → xxx_fix.srt
+  suffix: "_fix"
+
+# 校订配置
+fix:
+  # 提示词文件（相对于 cfg 目录）
+  prompt: "prompt-srtfix-ref.md"
+  # 无逐字稿参照时的提示词
+  prompt_noref: "prompt-srtfix-noref.md"
+  # 每次送入 LLM 的字幕条数
+  chunk_size: 80
+  # 用户自定义纠正词典（可选，相对于 cfg 目录）
+  custom_dict: "srtfix-dict.yaml"

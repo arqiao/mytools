@@ -130,7 +130,7 @@ def _prepare_audio_for_whisper(audio_path: Path) -> Path:
         return wav_path
 
 
-def transcribe_whisper(audio_path: Path, model_size: str = "small") -> Path | None:
+def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: bool = False) -> Path | None:
     """使用 Whisper 生成字幕（长音频自动分段处理）"""
     try:
         # 确保模型已下载
@@ -146,15 +146,18 @@ def transcribe_whisper(audio_path: Path, model_size: str = "small") -> Path | No
 
         # 自动检测 CUDA（通过 CTranslate2，不依赖 PyTorch）
         device, compute_type = "cpu", "int8"
-        try:
-            import ctranslate2
-            cuda_types = ctranslate2.get_supported_compute_types("cuda")
-            if cuda_types:
-                device = "cuda"
-                compute_type = "int8" if "int8" in cuda_types else "float16"
-                log.info(f"检测到 CUDA 可用，使用 {device}/{compute_type}")
-        except Exception:
-            pass
+        if not force_cpu:
+            try:
+                import ctranslate2
+                cuda_types = ctranslate2.get_supported_compute_types("cuda")
+                if cuda_types:
+                    device = "cuda"
+                    compute_type = "int8" if "int8" in cuda_types else "float16"
+                    log.info(f"检测到 CUDA 可用，使用 {device}/{compute_type}")
+            except Exception:
+                pass
+        else:
+            log.info("强制使用 CPU 模式")
 
         log.info(f"加载 Whisper {model_size} 模型 ({device}/{compute_type})...")
         # 优先用本地缓存路径加载，避免每次联网检查版本
@@ -935,6 +938,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="使用所有方式转写")
     parser.add_argument("--model", default="medium",
                         help="Whisper 模型大小: tiny/small/medium/large (默认: medium)")
+    parser.add_argument("--cpu", action="store_true", help="强制使用 CPU 模式（显存不足时使用）")
     args = parser.parse_args()
 
     audio_path = Path(args.audio_file)
@@ -969,7 +973,7 @@ def main():
 
     if use_whisper:
         log.info("=== Whisper 转写 ===")
-        result = transcribe_whisper(audio_path, args.model)
+        result = transcribe_whisper(audio_path, args.model, args.cpu)
         if result:
             log.info(f"Whisper 字幕: {result}")
 

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""
+五步流水线脚本
+依次执行：s1 → s2 → s3 → s4 → s5
+每个 step 输出日志到 log-err 目录，错误时通知到飞书 debug 群
+"""
+
+import io
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import requests
+import yaml
+
+# Windows 控制台 UTF-8 模式
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+SCRIPT_DIR = Path(__file__).parent
+PROJECT_DIR = SCRIPT_DIR.parent
+CFG_DIR = PROJECT_DIR / "cfg"
+OUTPUT_DIR = PROJECT_DIR / "output"
+LOG_DIR = PROJECT_DIR / "log-err"
+LOG_DIR.mkdir(exist_ok=True)
+
+# 飞书群通知配置
+FEISHU_NOTIFY_CHAT_ID = "oc_42e15484900d10f7f30bcd18d72d1397"
+
+STEPS = [
+    ("s1", "视频下载", "src/s1_huifang.py"),
+    ("s2", "教学文档", "src/s2_wiki.py"),
+    ("s3", "Whisper字幕", "src/s3_subtitle.py"),
+    ("s4", "字幕修订", "src/s4_srt_fix.py"),
+    ("s5", "生成Addon", "src/s5_addon.py"),
+]
+
+
+def load_credentials():
+    creds_path = CFG_DIR / "credentials.yaml"
+    return yaml.safe_load(creds_path.read_text(encoding="utf-8"))
+
+
+def refresh_token(creds):
+    """使用 refresh_token 刷新 access_token"""
+    fs = creds.get("feishu", {})
+    refresh_token = fs.get("user_refresh_token", "")
+    if not refresh_token:
+        return None
+
+    try:
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/authen/v1/oidc/refresh_access_token",
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            print(f"  [Token刷新失败] {data.get('msg')}")
+            return None
+
+        td = data["data"]
+        creds["feishu"]["user_access_token"] = td["access_token"]
+        creds["feishu"]["user_refresh_token"] = td["refresh_token"]
+        creds["feishu"]["user_token_expire_time"] = int(time.time()) + td["expires_in"]
+
+        # 写回 credentials.yaml
+        creds_path = CFG_DIR / "credentials.yaml"
+        with open(creds_path, "w", encoding="utf-8") as f:
+            yaml.dump(creds, f, allow_unicode=True, default_flow_style=False)
+
+        print("  [Token 刷新成功]")
+        return creds
+    except Exception as e:
+        print(f"  [Token刷新异常] {e}")
+        return None
+
+
+def ensure_token(creds):
+    """确保 token 有效，必要时刷新"""
+    expire = creds.get("feishu", {}).get("user_token_expire_time", 0)
+    if time.time() > expire - 60:
+        print("[INFO] 飞书 token 过期，尝试刷新...")
+        new_creds = refresh_token(creds)
+        if new_creds:
+            return new_creds
+    return creds
+
+
+def get_feishu_token(creds):
+    token = creds.get("feishu", {}).get("user_access_token", "")
+    expire = creds.get("feishu", {}).get("user_token_expire_time", 0)
+    if time.time() > expire - 60:
+        print("[警告] 飞书 token 已过期")
+    return token
+
+
+def notify_feishu(creds, msg: str):
+    """发送文本消息到飞书群（使用 app token）"""
+    try:
+        # 先获取 app token
+        fs = creds.get("feishu", {})
+        app_id = fs.get("app_id", "")
+        app_secret = fs.get("app_secret", "")
+
+        app_resp = requests.post(
+            "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+            json={"app_id": app_id, "app_secret": app_secret},
+            timeout=10,
+        ).json()
+
+        app_token = app_resp.get("app_access_token")
+        if not app_token:
+            print(f"  [飞书通知失败] 获取 app token 失败")
+            return
+
+        content = json.dumps({"text": msg}, ensure_ascii=False)
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={
+                "Authorization": f"Bearer {app_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            json={
+                "receive_id": FEISHU_NOTIFY_CHAT_ID,
+                "msg_type": "text",
+                "content": content,
+            },
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            print(f"  [飞书通知失败] {data.get('msg')}")
+        else:
+            print(f"  [飞书通知已发送]")
+    except Exception as e:
+        print(f"  [飞书通知异常] {e}")
+
+
+def run_step(step_id, step_name, script_path):
+    """运行单个 step，返回 (success, error_msg)"""
+    log_file = LOG_DIR / f"{step_id}_pipeline.log"
+
+    print(f"\n{'='*60}")
+    print(f"▶ Step {step_id}: {step_name}")
+    print(f"{'='*60}")
+
+    start_time = time.time()
+
+    # 使用 python 运行脚本，日志同时输出到文件和控制台
+    cmd = [sys.executable, str(script_path)]
+
+    try:
+        # 设置环境让子进程输出 UTF-8
+        env = {"PYTHONIOENCODING": "utf-8"}
+        env.update(__import__("os").environ)
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(PROJECT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        # 实时输出并写入日志
+        with open(log_file, "w", encoding="utf-8") as log_f:
+            for line in proc.stdout:
+                print(line, end="")
+                log_f.write(line)
+                log_f.flush()
+
+        proc.wait()
+        elapsed = time.time() - start_time
+
+        if proc.returncode == 0:
+            print(f"\n✓ Step {step_id} 完成 (耗时 {elapsed:.1f}s)")
+            return True, None
+        else:
+            error_msg = f"Step {step_id} 失败，exit code {proc.returncode}"
+            print(f"\n✗ {error_msg}")
+            return False, error_msg
+
+    except Exception as e:
+        error_msg = f"Step {step_id} 异常: {e}"
+        print(f"\n✗ {error_msg}")
+        # 写入错误日志
+        with open(log_file, "a", encoding="utf-8") as log_f:
+            log_f.write(f"\n[EXCEPTION] {e}\n")
+        return False, error_msg
+
+
+def main():
+    print(f"{'='*60}")
+    print("五步流水线开始")
+    print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
+
+    creds = load_credentials()
+    creds = ensure_token(creds)  # 确保 token 有效
+    feishu_token = get_feishu_token(creds)
+
+    # 读取 config.yaml 获取任务信息
+    config_path = CFG_DIR / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    tasks = config.get("tasks", [])
+    task_count = len(tasks)
+
+    # 发送开始通知
+    if task_count > 0:
+        task_info = f"任务: {task_count} 个\n"
+        if tasks:
+            task_info += f"首个: {tasks[0].get('source_url', 'N/A')[:60]}"
+        notify_feishu(creds, f"[dl-video] 流水线开始\n{task_info}")
+
+    failed_steps = []
+    error_details = []
+
+    # 每次执行 step 后可能刷新了 token，需要重新加载
+    creds = load_credentials()
+    feishu_token = get_feishu_token(creds)
+
+    for step_id, step_name, script_path in STEPS:
+        script = PROJECT_DIR / script_path
+        if not script.exists():
+            error = f"脚本不存在: {script}"
+            print(f"✗ {error}")
+            failed_steps.append((step_id, error))
+            error_details.append(error)
+            break
+
+        success, error_msg = run_step(step_id, step_name, script)
+
+        if not success:
+            failed_steps.append((step_id, error_msg))
+            error_details.append(error_msg)
+
+            # 错误时通知飞书（重新加载 token）
+            creds = load_credentials()
+            notify_feishu(
+                creds,
+                f"[dl-video] ✗ Step {step_id} ({step_name}) 失败\n"
+                f"错误: {error_msg}\n"
+                f"日志: {LOG_DIR / f'{step_id}_pipeline.log'}"
+            )
+            break
+
+        # step 成功后重新加载 token（可能被刷新了）
+        creds = load_credentials()
+        feishu_token = get_feishu_token(creds)
+
+    # 汇总结果
+    print(f"\n{'='*60}")
+    print("流水线执行结果")
+    print(f"{'='*60}")
+
+    if not failed_steps:
+        print("✓ 全部步骤执行成功")
+
+        # 列出输出文件
+        if OUTPUT_DIR.exists():
+            md_files = list(OUTPUT_DIR.glob("*.md"))
+            ts_files = list(OUTPUT_DIR.glob("*.ts"))
+            mp3_files = list(OUTPUT_DIR.glob("*.mp3"))
+            srt_files = list(OUTPUT_DIR.glob("*.srt"))
+
+            print(f"\n输出文件:")
+            if ts_files:
+                print(f"  视频: {len(ts_files)} 个")
+            if mp3_files:
+                print(f"  音频: {len(mp3_files)} 个")
+            if srt_files:
+                print(f"  字幕: {len(srt_files)} 个")
+            if md_files:
+                print(f"  文档: {len(md_files)} 个")
+
+        notify_feishu(creds, f"[dl-video] ✓ 流水线执行成功\n5个步骤全部完成")
+
+    else:
+        print(f"✗ {len(failed_steps)} 个步骤失败:")
+        for step_id, error in failed_steps:
+            print(f"  - {step_id}: {error}")
+
+    print(f"\n日志文件目录: {LOG_DIR}")
+    return len(failed_steps) == 0
+
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)

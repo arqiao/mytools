@@ -1,0 +1,326 @@
+========================================
+[周三 2026/03/18  1:47:32.63] start cron-gomessage
+========================================
+[ 1:47:32.64] run goMessage --profile ai
+============================================================
+飞书群消息整理工具
+============================================================
+
+Token 已过期或无效，尝试刷新...
+✓ Token 刷新成功，有效期: 1.9 小时
+
+✓ Token 验证成功
+
+✓ 使用已配置的群聊 ID: oc_3204c7360f0b89f350480ac8f7a130c8
+
+上次处理时间: 2026-03-17 18:21:17
+
+正在获取群聊消息...
+✓ 消息总数: 1896 条，其中自 18:21 以后的新消息有 11 条
+
+正在提取消息中的链接...
+✓ 提取到 5 个链接
+
+正在读取本地 CSV 已有 URL...
+✓ CSV 中已有 1124 条 URL 记录
+
+正在读取多维表格已有记录（字段: 链接）...
+✓ 多维表格中已有 1818 条记录
+
+正在获取 Pin 消息列表...
+✓ 群内共有 0 条 Pin 消息
+
+开始处理链接...
+
+[1/5] 处理: https://yb.tencent.com/s/0QMugZvxSWFc?source=0
+  消息序号: 1887
+  标题: Master chief和元宝的对话
+  来源: 未识别
+  日期: 未获取
+
+[2/5] 处理: https://yb.tencent.com/s/qoFeIBYCVVIm?source=0
+  消息序号: 1888
+  标题: Master chief和元宝的对话
+  来源: 未识别
+  日期: 未获取
+
+[3/5] 处理: https://mp.weixin.qq.com/s/M753wIwXk6NqDzlV0yp8MQ
+  消息序号: 1891
+  标题: 天机阁AI六爻测算：当千年六爻遇见AI算卦，会是什么体验
+  来源: 微信-十一AIGC
+  日期: 20260317
+
+[4/5] 处理: https://mp.weixin.qq.com/s/ncWAFPlJA6d0mGV2ifMn9A
+  消息序号: 1893
+  标题: 让 OpenClaw 拥有超强记忆，MemOS 开源了！
+  来源: 微信-GitCake
+  日期: 20260317
+
+[5/5] 处理: https://mp.weixin.qq.com/s/MPQtXPLK9eNJyr5_ygK6ug
+  消息序号: 1895
+  标题: 黄仁勋GTC演讲3万字全文：推理拐点已至，2027年芯片订单需求1万亿美元，全新的Vera Rubi
+  来源: 微信-王铮Silvia
+  日期: 20260317
+
+正在将 5 条记录写入 CSV...
+✓ 数据已写入 D:\workspace\clawbots\feishuMSG-xls\log-err\message_log.csv
+✓ 解析异常日志: 2 条 -> D:\workspace\clawbots\feishuMSG-xls\log-err\parse_error_log.csv
+
+正在将 3 条非重复记录批量写入多维表格...
+✓ 多维表格批量写入完成: 成功 3 条, 失败 0 条
+
+正在撤回 5 条已处理消息（倒序）...
+✓ 撤回完成: 成功 5 条, 失败 0 条
+
+✓ 已更新处理时间: 2026-03-17 20:31:46
+
+============================================================
+处理完成
+============================================================
+成功: 5 条
+失败: 0 条
+总计: 5 条
+[ 1:49:20.97] run goMessage --profile ot
+============================================================
+飞书群消息整理工具
+============================================================
+
+✓ Token 验证成功
+
+✓ 使用已配置的群聊 ID: oc_9eeb7097a2443316645fff42f42df472
+
+上次处理时间: 2026-03-17 16:35:31
+
+正在获取群聊消息...
+✓ 消息总数: 87 条，其中自 16:35 以后的新消息有 1 条
+
+正在提取消息中的链接...
+✓ 提取到 0 个链接
+
+没有包含链接的消息
+✓ 已更新处理时间: 2026-03-17 16:37:13
+[ 1:49:23.15] done
+========================================
+[周三 2026/03/18 11:42:09.23] start cron-gomessage
+========================================
+[11:42:09.23] run goMessage --profile ai
+============================================================
+飞书群消息整理工具
+============================================================
+
+Token 已过期或无效，尝试刷新...
+✓ Token 刷新成功，有效期: 1.9 小时
+
+✓ Token 验证成功
+
+✓ 使用已配置的群聊 ID: oc_3204c7360f0b89f350480ac8f7a130c8
+
+上次处理时间: 2026-03-17 20:31:46
+
+正在获取群聊消息...
+✓ 消息总数: 1896 条，其中自 20:31 以后的新消息有 1 条
+
+正在提取消息中的链接...
+✓ 提取到 0 个链接
+
+没有包含链接的消息
+✓ 已更新处理时间: 2026-03-17 20:33:20
+[11:43:12.56] run goMessage --profile ot
+============================================================
+飞书群消息整理工具
+============================================================
+
+✓ Token 验证成功
+
+✓ 使用已配置的群聊 ID: oc_9eeb7097a2443316645fff42f42df472
+
+上次处理时间: 2026-03-17 16:37:13
+
+正在获取群聊消息...
+✓ 消息总数: 87 条，其中自 16:37 以后的新消息有 0 条
+
+没有新消息需要处理
+[11:43:14.74] done
+========================================
+[周三 2026/03/18 15:13:09.79] start cron-gomessage
+========================================
+[15:13:09.80] run goMessage --profile ai
+============================================================
+飞书群消息整理工具
+============================================================
+
+Token 已过期或无效，尝试刷新...
+✓ Token 刷新成功，有效期: 1.9 小时
+
+✓ Token 验证成功
+
+✓ 使用已配置的群聊 ID: oc_3204c7360f0b89f350480ac8f7a130c8
+
+上次处理时间: 2026-03-17 20:33:20
+
+正在获取群聊消息...
+✓ 消息总数: 1936 条，其中自 20:33 以后的新消息有 40 条
+
+正在提取消息中的链接...
+✓ 提取到 21 个链接
+
+正在读取本地 CSV 已有 URL...
+✓ CSV 中已有 1129 条 URL 记录
+
+正在读取多维表格已有记录（字段: 链接）...
+✓ 多维表格中已有 1821 条记录
+
+正在获取 Pin 消息列表...
+✓ 群内共有 0 条 Pin 消息
+
+开始处理链接...
+
+[1/21] 处理: https://mp.weixin.qq.com/s/jm0YQWGgAS9sfrl4ucvYuQ
+  消息序号: 1897
+  标题: Kimi新架构训练效率提升25%！马斯克夸赞
+  来源: 微信-算泥
+  日期: 20260318
+
+[2/21] 处理: https://mp.weixin.qq.com/s/DaGTN80Il50xc47hR8736Q
+  消息序号: 1899
+  标题: Atom Capital：OpenClaw带来了哪些机会，窗口期还有多久？
+  来源: 微信-Atom Capital
+  日期: 20260305
+  重复: 是
+
+[3/21] 处理: https://mp.weixin.qq.com/s/QYu9fzdZKWMofMvO12RTxg
+  消息序号: 1900
+  标题: RWKV-7 G1e模型发布，能力全面增强
+  来源: 微信-始智AI wisemodel
+  日期: 20260317
+
+[4/21] 处理: https://mp.weixin.qq.com/s/Z8_vLUSmNyAG3BAFtrrf_Q?from=groupmessage&scene=1&subscene=10000&clicktime=1773806007&enterid=1773806007&sessionid=0&ascene=1&fasttmpl_type=0&fasttmpl_fullversion=8174020-zh_CN-zip&fasttmpl_flag=0&realreporttime=1773806007508
+  消息序号: 1903
+  标题: 硅谷爆料：AI替代人工，Meta这次裁员或达60%！
+  来源: 微信-美股投资客
+  日期: 20260318
+
+[5/21] 处理: https://mp.weixin.qq.com/s/4tQoD81Iz3zfRIfanZZhdw
+  消息序号: 1904
+  标题: 新物种LibTV，小龙虾一句话出大片！你和Agent都能用的AI视频工具~~
+  来源: 微信-AIGC创意猎人
+  日期: 20260318
+
+[6/21] 处理: https://mp.weixin.qq.com/s/SEaJC-k0UC1Js6UW63118Q
+  消息序号: 1905
+  标题: 《2026年医疗AI可见度报告》
+  来源: 微信-数字医疗
+  日期: 20260318
+
+[7/21] 处理: https://mp.weixin.qq.com/s/tTEWecxNffhrWJUyPmoqhw
+  消息序号: 1906
+  标题: 算力与能源共生：全球AI智算中心格局、2050能源趋势及中美能源博弈
+  来源: 微信-勇说数智
+  日期: 20260318
+
+[8/21] 处理: https://mp.weixin.qq.com/s/mtNtPeRHjOGM_TeZljpt7A
+  消息序号: 1909
+  标题: 极客大神构建了LLM架构画廊，Karpathy点赞
+  来源: 微信-算泥
+  日期: 20260318
+
+[9/21] 处理: https://mp.weixin.qq.com/s/w3aqYDZ1DgQgw2txhgBz9Q?wxwork_userid=ChenHang&from=groupmessage&scene=1&subscene=10000&sessionid=1773806117&clicktime=1773812763&enterid=1773812763#wechat_redirect
+  消息序号: 1911
+  标题: 四城虾王争霸！北京上海深圳杭州，谁的虾最会整活？
+  来源: 微信-玩转扣子
+  日期: 20260317
+
+[10/21] 处理: https://mp.weixin.qq.com/s/6IaSkRjqXCR9hjFNxLeAtg
+  消息序号: 1913
+  标题: ima上线skills，“龙虾”可以帮你干活了
+  来源: 微信-ima.copilot
+  日期: 20260317
+
+[11/21] 处理: https://mp.weixin.qq.com/s/kvtyAQxRbmDnV6QahCMSeg
+  消息序号: 1915
+  标题: 语音输入的终极形态：三层纠错让它越用越懂你
+  来源: 微信-第 101 次连接
+  日期: 20260317
+
+[12/21] 处理: https://mp.weixin.qq.com/s/oHexancoJbZzX85UQnazhw
+  消息序号: 1917
+  标题: 一人公司，我雇了 6 个 AI 龙虾总监
+  来源: 微信-苍何
+  日期: 20260318
+
+[13/21] 处理: https://mp.weixin.qq.com/s/Xfsq8YDP7xkOLzbh1HwdjA
+  消息序号: 1919
+  标题: MiniMax M2.7: 开启模型的自我进化
+  来源: 微信-MiniMax 稀宇科技
+  日期: 20260318
+
+[14/21] 处理: https://mp.weixin.qq.com/s/cIQuEXQ7wzYtagmtmcWF6g
+  消息序号: 1921
+  标题: 杨斌丨模元（token）：AI时代的新度量衡
+  来源: 微信-清华大学可持续社会价值研究院
+  日期: 20260318
+
+[15/21] 处理: https://mp.weixin.qq.com/s/fAqH1FJW0mPJar_nE3qs6g
+  消息序号: 1923
+  标题: LibTV和普通视频agent有什么区别？实测告诉你
+  来源: 微信-AI创业伙伴
+  日期: 20260318
+
+[16/21] 处理: https://mp.weixin.qq.com/s/OoYlK98jmr944S9eO1WxgQ?from=groupmessage&scene=1&subscene=10000&sessionid=1773806117&clicktime=1773814247&enterid=1773814247&ascene=1&fasttmpl_type=0&fasttmpl_fullversion=8174020-zh_CN-zip&fasttmpl_flag=0&realreporttime=1773814247240
+  消息序号: 1925
+  标题: AI+硬件 WhaleBot鲸鱼小车复刻工程 TASK1 DIY所需硬件
+  来源: 微信-网安杂谈
+  日期: 20260212
+
+[17/21] 处理: https://mp.weixin.qq.com/s/Uq7fFoI2pYkZHMHMTzFe7g
+  消息序号: 1927
+  标题: 国安部发布：“龙虾”（OpenClaw）安全养殖手册
+  来源: 微信-中国信息安全
+  日期: 20260317
+
+[18/21] 处理: https://mp.weixin.qq.com/s/627mVhea97gkVdgyk4fwVg
+  消息序号: 1929
+  标题: 未获取
+  来源: 微信X失效
+  日期: 未获取
+
+[19/21] 处理: https://mp.weixin.qq.com/s/fhA409bIPLb_HXyAL45GKQ
+  消息序号: 1930
+  标题: 每月给龙虾充几百刀的朋友，这组Skill值得你最先装上
+  来源: 微信-夕小瑶科技说
+  日期: 20260318
+
+[20/21] 处理: https://mp.weixin.qq.com/s/V-R6qWAL2tPuFyEqwZucvQ
+  消息序号: 1933
+  标题: 技能商店里藏着三个Skill，我用完不想卸
+  来源: 微信-傅盛
+  日期: 20260318
+
+[21/21] 处理: https://mp.weixin.qq.com/s/sYS7EqeCp6yl1BLUxPkwOA
+  消息序号: 1935
+  标题: 李诞的虾，把搞 AI 的都看沉默了
+  来源: 微信-AGI Hunt
+  日期: 20260317
+
+正在将 21 条记录写入 CSV...
+✓ 数据已写入 D:\workspace\clawbots\feishuMSG-xls\log-err\message_log.csv
+✓ 重复记录日志: 1 条 -> D:\workspace\clawbots\feishuMSG-xls\log-err\duplicate_log.csv
+✓ 解析异常日志: 1 条 -> D:\workspace\clawbots\feishuMSG-xls\log-err\parse_error_log.csv
+
+正在将 20 条非重复记录批量写入多维表格...
+✓ 多维表格批量写入完成: 成功 20 条, 失败 0 条
+
+正在撤回 21 条已处理消息（倒序）...
+请求异常 (第1次): HTTPSConnectionPool(host='open.feishu.cn', port=443): Max retries exceeded with url: /open-apis/im/v1/messages/om_x100b54978c234480b3fdaa57cc7f4d5 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1032)')))
+✓ 撤回完成: 成功 21 条, 失败 0 条
+
+✓ 已更新处理时间: 2026-03-18 14:56:40
+
+============================================================
+处理完成
+============================================================
+成功: 21 条
+失败: 0 条
+总计: 21 条
+[16:03:11.42] run goMessage --profile ot
+[16:03:11.70] done

@@ -22,7 +22,7 @@ tasks:
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   - source_type: "xiaoe"            # 小鹅通
-    source_url: "https://appsbkkqmgs9185.h5.xiaoecloud.com/p/course/video/v_68bbfc7ce4b0694c5b269573"
+    source_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b63c0ae4b0694c34e8e36c"
     wiki_url: ""
     target_wiki_url: ""
 

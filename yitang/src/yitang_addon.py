@@ -189,6 +189,14 @@ class LLMClient:
                     continue
                 log.error(f"LLM 调用失败: {e}, 响应: {resp.text}")
                 raise
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                if attempt < 2:
+                    wait = 2 ** attempt * 10
+                    log.warning(f"LLM 调用超时/连接错误，等待 {wait}s 后重试 ({attempt+1}/3)...")
+                    time.sleep(wait)
+                    continue
+                log.error(f"LLM 调用超时，重试耗尽: {e}")
+                raise
             except Exception as e:
                 log.error(f"LLM 调用异常: {e}")
                 raise
@@ -197,7 +205,8 @@ class LLMClient:
     def report_usage(self):
         """输出 token 用量统计"""
         log.info(
-            f"LLM 用量统计: 调用 {self.total_calls} 次, "
+            f"LLM 用量统计: provider={self.provider}, model={self.model}, "
+            f"调用 {self.total_calls} 次, "
             f"输入 {self.total_input_tokens} tokens, "
             f"输出 {self.total_output_tokens} tokens"
         )
@@ -244,70 +253,105 @@ def parse_llm_json(reply):
 
 def merge_results(subtitle_items, discussion_items, sections):
     """按章节合并字幕和讨论区提取结果。
-    返回 (merged_dict, stats)：
-    - merged_dict: {章节标题: {"subtitle": [...], "discussion": [...]}}
+    sections 中可能有同名章节，用索引区分。
+    返回 (merged_list, stats)：
+    - merged_list: [(章节标题, {"subtitle": [...], "discussion": [...]}), ...]
+      与 sections 一一对应
     - stats: 统计数据 dict
     """
-    section_titles = [t for t, _ in sections]
-    merged = {}
-    for title in section_titles:
-        merged[title] = {"subtitle": [], "discussion": []}
+    # 初始化：与 sections 一一对应
+    merged = [{"subtitle": [], "discussion": []} for _ in sections]
 
     def add_item(item, source):
         chapter = item.get("chapter", "")
-        # 模糊匹配：找最接近的章节标题
-        target = _match_chapter(chapter, section_titles)
-        if target not in merged:
-            merged[target] = {"subtitle": [], "discussion": []}
-        merged[target][source].append(item)
+        idx = _match_chapter_idx(chapter, sections)
+        merged[idx][source].append(item)
 
     for item in subtitle_items:
         add_item(item, "subtitle")
     for item in discussion_items:
         add_item(item, "discussion")
 
+    # 去重：同一章节同一来源内，内容高度相似的条目只保留第一条
+    dedup_count = 0
+    for data in merged:
+        for source in ("subtitle", "discussion"):
+            items = data[source]
+            if len(items) <= 1:
+                continue
+            unique = []
+            for item in items:
+                content = item.get("content", "")
+                if not any(_is_similar(content, u.get("content", "")) for u in unique):
+                    unique.append(item)
+                else:
+                    dedup_count += 1
+            data[source] = unique
+    if dedup_count:
+        log.info(f"去重移除 {dedup_count} 条重复信息")
+
     # 统计
     sub_cats = {}
     disc_cats = {}
-    for items in merged.values():
-        for it in items["subtitle"]:
+    for data in merged:
+        for it in data["subtitle"]:
             cat = it.get("category", "其他")
             sub_cats[cat] = sub_cats.get(cat, 0) + 1
-        for it in items["discussion"]:
+        for it in data["discussion"]:
             cat = it.get("category", "其他")
             disc_cats[cat] = disc_cats.get(cat, 0) + 1
 
     total_sub = sum(sub_cats.values())
     total_disc = sum(disc_cats.values())
-    # 信息密度最高的章节
+    # 信息密度最高的章节（同名章节各自独立统计）
     density = []
-    for title in section_titles:
-        n = len(merged.get(title, {}).get("subtitle", []))
-        n += len(merged.get(title, {}).get("discussion", []))
+    for i, (title, _) in enumerate(sections):
+        n = len(merged[i]["subtitle"]) + len(merged[i]["discussion"])
         if n > 0:
-            density.append((title, n))
-    density.sort(key=lambda x: x[1], reverse=True)
+            density.append((i, title, n))
+    density.sort(key=lambda x: x[2], reverse=True)
 
     stats = {
         "total_subtitle": total_sub,
         "total_discussion": total_disc,
         "subtitle_categories": sub_cats,
         "discussion_categories": disc_cats,
-        "top_chapters": density[:5],
+        "top_chapters": [(t, n) for _, t, n in density[:5]],
     }
     return merged, stats
 
 
-def _match_chapter(chapter, section_titles):
-    """模糊匹配章节标题：精确匹配 > 包含匹配 > 归入第一个章节"""
+def _match_chapter_idx(chapter, sections):
+    """模糊匹配章节，返回 sections 中的索引。
+    精确匹配 > 包含匹配 > 归入第一个章节。"""
     if not chapter:
-        return section_titles[0] if section_titles else "(未分类)"
-    if chapter in section_titles:
-        return chapter
-    for t in section_titles:
-        if chapter in t or t in chapter:
-            return t
-    return section_titles[0] if section_titles else "(未分类)"
+        return 0
+    # 精确匹配
+    for i, (title, _) in enumerate(sections):
+        if chapter == title:
+            return i
+    # 包含匹配
+    for i, (title, _) in enumerate(sections):
+        if chapter in title or title in chapter:
+            return i
+    return 0
+
+
+def _is_similar(a, b, threshold=0.6):
+    """判断两段文本是否高度相似（基于字符集合的 Jaccard 相似度）。
+    适用于检测 LLM 跨段重复输出的近似内容。"""
+    if not a or not b:
+        return False
+    # 按字符 bigram 计算
+    def bigrams(s):
+        s = s.replace(" ", "")
+        return set(s[i:i+2] for i in range(len(s) - 1)) if len(s) > 1 else {s}
+    sa, sb = bigrams(a), bigrams(b)
+    if not sa or not sb:
+        return False
+    intersection = len(sa & sb)
+    union = len(sa | sb)
+    return (intersection / union) >= threshold
 
 
 def render_full_report(merged, stats, sections, prefix, output_path):
@@ -333,9 +377,8 @@ def render_full_report(merged, stats, sections, prefix, output_path):
     lines.append("")
 
     # 按章节输出
-    section_titles = [t for t, _ in sections]
-    for title in section_titles:
-        data = merged.get(title, {"subtitle": [], "discussion": []})
+    for i, (title, _) in enumerate(sections):
+        data = merged[i]
         sub_items = data["subtitle"]
         disc_items = data["discussion"]
         if not sub_items and not disc_items:
@@ -574,6 +617,14 @@ def main():
     subtitle_path = resolve_path(subtitle_path)
     discussion_path = resolve_path(discussion_path)
 
+    # 优先使用 _fix 版本的字幕（经过 srtfix 校订的版本）
+    if subtitle_path and not is_feishu_url(subtitle_path):
+        sp = Path(subtitle_path)
+        fix_path = sp.parent / f"{sp.stem}_fix{sp.suffix}"
+        if fix_path.exists():
+            log.info(f"检测到校订版字幕，优先使用: {fix_path.name}")
+            subtitle_path = str(fix_path)
+
     if not transcript_src:
         log.error("未配置逐字稿来源 (input.transcript)")
         return
@@ -626,11 +677,19 @@ def main():
         output_dir = PROJECT_DIR / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 生成输出文件名前缀
+    # 生成输出文件名前缀：优先字幕文件名 > 讨论区文件名 > 逐字稿
     prefix = config.get("output", {}).get("prefix", "")
     if not prefix:
-        src = transcript_src
-        prefix = Path(src).stem if not is_feishu_url(src) else "feishu_doc"
+        if subtitle_path and Path(subtitle_path).exists():
+            # 去掉 _wm 后缀，如 AI落地Live_069_wm.srt → AI落地Live_069
+            stem = Path(subtitle_path).stem
+            prefix = re.sub(r"_wm$", "", stem)
+        elif discussion_path and Path(discussion_path).exists():
+            prefix = Path(discussion_path).stem
+        elif not is_feishu_url(transcript_src):
+            prefix = Path(transcript_src).stem
+        else:
+            prefix = "feishu_doc"
 
     # ── 字幕对比分析 ──
     subtitle_items = []
@@ -649,10 +708,13 @@ def main():
                 f"---\n\n"
                 f"## 字幕原文（{start} ~ {end}）\n\n{chunk_text}"
             )
-            reply = llm.chat(prompt_subtitle, user_prompt)
-            items = parse_llm_json(reply)
-            subtitle_items.extend(items)
-            log.info(f"    提取 {len(items)} 条信息")
+            try:
+                reply = llm.chat(prompt_subtitle, user_prompt)
+                items = parse_llm_json(reply)
+                subtitle_items.extend(items)
+                log.info(f"    提取 {len(items)} 条信息")
+            except Exception as e:
+                log.error(f"    字幕段 {i+1} 处理失败，跳过: {e}")
 
         log.info(f"字幕对比分析完成，共提取 {len(subtitle_items)} 条")
 
@@ -679,10 +741,13 @@ def main():
                 f"---\n\n"
                 f"## 讨论区发言记录（第 {i+1}/{len(disc_chunks)} 段）\n\n{chunk_text}"
             )
-            reply = llm.chat(prompt_discussion, user_prompt)
-            items = parse_llm_json(reply)
-            discussion_items.extend(items)
-            log.info(f"    提取 {len(items)} 条信息")
+            try:
+                reply = llm.chat(prompt_discussion, user_prompt)
+                items = parse_llm_json(reply)
+                discussion_items.extend(items)
+                log.info(f"    提取 {len(items)} 条信息")
+            except Exception as e:
+                log.error(f"    讨论区段 {i+1} 处理失败，跳过: {e}")
 
         log.info(f"讨论区分析完成，共提取 {len(discussion_items)} 条")
 
@@ -701,8 +766,13 @@ def main():
                 analysis_cfg.get("prompt_digest", "prompt-digest.md")
             )
             digest_reply = llm.chat(prompt_digest, report_content)
+            # 清理 LLM 可能包裹的 code fence
+            digest_text = re.sub(
+                r"^```(?:markdown)?\s*\n(.*)\n```\s*$", r"\1",
+                digest_reply.strip(), flags=re.DOTALL,
+            )
             digest_path = output_dir / f"{prefix}_精华摘要.md"
-            digest_path.write_text(digest_reply, encoding="utf-8")
+            digest_path.write_text(digest_text, encoding="utf-8")
             log.info(f"精华摘要输出: {digest_path}")
 
     llm.report_usage()
