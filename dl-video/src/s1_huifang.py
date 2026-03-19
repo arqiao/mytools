@@ -52,22 +52,22 @@ def main():
         log.info(f"=== 任务 {i+1}/{len(tasks)}: {source_type} ===")
 
         if source_type == "feishu_minutes":
-            from s1_feishumiaoji import process_feishu_minutes
+            from s1w_feishumiaoji import process_feishu_minutes
             process_feishu_minutes(task, config, creds)
         elif source_type == "tencent_meeting":
-            from s1_tencentmeeting import process_tencent_meeting
+            from s1w_tencentmeeting import process_tencent_meeting
             process_tencent_meeting(task, config, creds)
         elif source_type == "zhihu":
-            from s1_zhihu import process_zhihu
+            from s1w_zhihu import process_zhihu
             process_zhihu(task, config, creds)
         elif source_type == "xiaoe":
-            from s1_xiaoe import process_xiaoe
+            from s1w_xiaoe import process_xiaoe
             process_xiaoe(task, config, creds)
         elif source_type == "panda":
-            from s1_panda import process_panda
+            from s1w_panda import process_panda
             process_panda(task, config, creds)
         elif source_type == "taobao":
-            from s1_taobao import process_taobao
+            from s1w_taobao import process_taobao
             process_taobao(task, config, creds)
         else:
             log.warning(f"暂不支持的视频源: {source_type}")

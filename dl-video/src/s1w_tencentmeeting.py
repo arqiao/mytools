@@ -25,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "s1_tencentmeeting.log", encoding="utf-8"),
+        logging.FileHandler(LOG_DIR / "s1w_tencentmeeting.log", encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
