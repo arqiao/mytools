@@ -137,57 +137,51 @@ dl-video/
 3. **API 获取**：会议数据（标题、日期、时间轴、纪要）、逐字稿
 
 **关键 ID 说明**：
-- `sharing_id`：URL 中的短代码（支持 `/cw/` 和 `/crm/` 两种格式，后者会重定向到前者）
-- `meeting_id`：会议唯一标识（19位数字，8开头），从页面HTML提取
-- `recording_id`：录制唯一标识（19位数字，2开头），从页面HTML提取
+- `sharing_id`：URL 中的短代码（支持 `/cw/` 和 `/crm/` 两种格式，后者会重定向到前者），仅用于构造浏览器访问 URL
+- `recording_id`：录制唯一标识（19位数字，2开头），从页面HTML提取，是三个 API 的核心参数
 
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
-| **sharing_id** | 直接从URL提取（正则） | URL中明文存在，无需浏览器 | 无 |
-| **meeting_id** | 浏览器提取（HTML中19位数字，8开头） | 页面动态渲染后才出现，需等待JS执行 | 无 |
-| **recording_id** | 浏览器提取（HTML中19位数字，2开头） | 页面动态渲染后才出现，需等待JS执行 | 无 |
-| **视频URL** | 浏览器提取（`<video>` 标签src） | 包含动态签名token，有时效性，无法通过API获取 | 无 |
+| **sharing_id** | 直接从URL提取（正则） | 仅用于构造浏览器访问 URL | 无 |
+| **recording_id** | 浏览器提取（HTML中19位数字，2开头） | 三个 API 的核心参数 | 无 |
+| **视频URL** | 浏览器提取（`<video>` 标签src） | 包含动态签名token和日期信息 | 无 |
 | **cookies** | 浏览器获取 | 用于后续API认证，可跨会议复用 | 无 |
-| **会议标题** | 浏览器提取或API获取 | 浏览器从页面提取，或通过 get-multi-record-info API | sharing_id + cookies |
-| **会议日期** | 浏览器提取或API获取 | 浏览器从页面提取，或通过 get-multi-record-info API | sharing_id + cookies |
-| **时间轴** | API获取（优先）或页面文本解析 | query-timeline API → `data.timeline_info.timeline_infos[]`，start_time为秒数；fallback解析页面文本 | recording_id + meeting_id + auth_share_id + cookies |
-| **会议纪要** | API获取（优先）或页面文本解析 | query-summary-and-note API → `data.deepseek_summary.topic_summary`；fallback解析页面文本 | recording_id + meeting_id + auth_share_id + cookies |
-| **逐字稿** | API获取 | 通过 minutes/detail API，返回毫秒级时间戳 | meeting_id + recording_id + cookies |
+| **会议标题** | 浏览器 DOM 元素或页面文本 | SPA 页面，原始 HTML 无标题，需 JS 渲染 | 无 |
+| **会议日期** | 从视频URL解析（`TM-YYYYMMDD`） | 视频 URL 中固定包含日期时间 | 视频URL |
+| **时间轴** | query-timeline API | `data.timeline_info.timeline_infos[]`，start_time为秒数 | recording_id + cookies |
+| **会议纪要** | query-summary-and-note API | `data.deepseek_summary.topic_summary` | recording_id + cookies |
+| **逐字稿** | minutes/detail API | 毫秒级时间戳 | recording_id + cookies |
 
 **优化要点**：
-- 浏览器只用于提取4个必需项（meeting_id、recording_id、视频URL、cookies），标题和日期也从浏览器页面提取
-- 纪要和时间轴优先通过专用 API（query-summary-and-note、query-timeline）获取结构化数据，API 失败时 fallback 到页面文本解析
-- sharing_id 从URL直接提取，节省浏览器操作
+- 浏览器用于提取 recording_id、视频URL、cookies、标题；日期从视频URL中解析
+- 三个 API 仅需 recording_id + cookies，不需要 meeting_id、sharing_id、auth_share_id
+- sharing_id 仅用于构造浏览器访问 URL，不参与 API 调用
 - cookies 可跨会议复用，避免重复登录
-- API 需要 auth_share_id（UUID格式），从浏览器拦截的 API 请求中提取
 
 **流程**：
-1. `extract_meeting_id(url)` — 从 URL 提取 sharing_id（正则 `/c(?:w|rm)/([A-Za-z0-9]+)`）
+1. `extract_sharing_id(url)` — 从 URL 提取 sharing_id（正则 `/c(?:w|rm)/([A-Za-z0-9]+)`）
 2. `fetch_meeting_page(sharing_id, cookie)` — Playwright 无头浏览器：
    - 访问 `https://meeting.tencent.com/cw/{sharing_id}`
    - 等待页面加载，检测登录状态（需要时等待用户扫码）
-   - 从页面HTML提取 meeting_id 和 recording_id（正则匹配19位数字）
-   - 从 `<video>` 标签提取视频URL（含签名token）
+   - 从页面HTML提取 recording_id（正则匹配19位数字，2开头）
+   - 从 DOM 元素或页面文本提取标题
+   - 从 `<video>` 标签提取视频URL（含签名token和日期）
    - 获取浏览器 cookies
-   - 返回 (meeting_id, recording_id, video_url, cookies)
-3. `fetch_meeting_data_via_api(meeting_id, recording_id, auth_share_id, cookies)` — API 获取纪要和时间轴：
-   - `POST /wemeet-tapi/v2/meetlog/public/record-detail/query-timeline` → 时间轴（`data.timeline_info.timeline_infos[]`，start_time为秒数）
-   - `POST /wemeet-tapi/v2/meetlog/public/record-detail/query-summary-and-note` → 纪要（`data.deepseek_summary.topic_summary`）
-   - 需要 auth_share_id（UUID格式，从浏览器拦截的API请求中提取）
-4. `_parse_api_summary(info)` — 将 API 纪要响应解析为格式化 markdown（总结段落 → 加粗标题 → 列表子项 → 会议待办）
-5. `parse_timeline_from_page_text(page_text)` — 页面文本解析时间轴（API fallback），含精确匹配"纪要"防误截断、去重
-6. `parse_summary_from_page_text(page_text)` — 页面文本解析纪要（API fallback），跳过"模版：主题摘要"前缀，保留层次格式
-7. `fetch_transcript_via_api(meeting_id, recording_id, cookies)` — API 获取逐字稿：
-   - `GET /wemeet-cloudrecording-webapi/v1/minutes/detail` → 逐字稿数据（带时间戳）
-   - 需要 meeting_id 和 recording_id 参数
-8. `parse_transcript_to_srt(transcript_lines)` — 将逐字稿转换为SRT格式（毫秒级时间戳）
-9. `generate_abs_md(summary, timeline)` — 生成摘要markdown（纪要 + 时间轴）
-10. `download_video(video_url, output_path, cookies)` — 流式下载视频（带进度显示）
-11. `extract_audio(video_path, audio_path)` — ffmpeg 从视频提取音频
-12. `safe_filename(title)` — 清理文件名中的非法字符（Windows兼容）
-13. `process_tencent_meeting(task, config, creds)` — 主入口函数，协调上述流程
+   - 返回 (recording_id, video_url, cookies, title, date_prefix, page_text)
+3. `parse_date_from_video_url(video_url)` — 从视频URL中提取日期（`TM-YYYYMMDD` → `YYMMDD-`）
+4. `fetch_meeting_data_via_api(recording_id, cookies)` — API 获取纪要和时间轴：
+   - `POST query-timeline` → 时间轴
+   - `POST query-summary-and-note` → 纪要
+   - 仅需 recording_id + cookies
+5. `_parse_api_summary(info)` — 将 API 纪要响应解析为格式化 markdown
+6. `fetch_transcript_via_api(recording_id, cookies)` — API 获取逐字稿
+7. `parse_transcript_to_srt(transcript_lines)` — 将逐字稿转换为SRT格式
+8. `generate_abs_md(summary, timeline)` — 生成摘要markdown（纪要 + 时间轴）
+9. `download_video(video_url, output_path, cookies)` — 流式下载视频
+10. `extract_audio(video_path, audio_path)` — ffmpeg 提取音频
+11. `process_tencent_meeting(task, config, creds)` — 主入口函数
 
 **输出文件**：
 - `{date_prefix}{title}.mp4` — 视频文件
@@ -201,11 +195,12 @@ dl-video/
 - 媒体 URL 的签名 token 是动态生成的，有时效性，必须从页面实时获取
 - 不同会议的 token 不同，无法复用
 - 同一用户的 cookies 可跨会议复用，避免重复登录
-- 纪要/时间轴 API（query-summary-and-note、query-timeline）需要 auth_share_id（UUID格式），从浏览器拦截的 API 请求 URL 中提取
+- 三个 API 实测仅需 recording_id + cookies，不需要 meeting_id、auth_share_id、share_id
 - 时间轴 API 的 start_time 是秒数（非毫秒），如 253 对应 00:04:13
 - 页面文本解析时间轴时，"纪要"作为结束标记需精确匹配（`line == '纪要'`），因为它也出现在 UI tab 标签中
 - 页面文本解析纪要时，需跳过"模版：主题摘要 会议总结"前缀（skip 前2行）
-- get-multi-record-info 和 uni-record-id API 在浏览器外部无法正常工作（返回空数据），标题和日期仍需从浏览器页面提取
+- 标题需从浏览器 DOM 提取（SPA 页面，原始 HTML 无标题数据）；日期从视频 URL 中的 `TM-YYYYMMDD` 格式解析
+- get-multi-record-info、common-record-info、get-play-url 等 API 在浏览器外部均无法正常工作（返回空数据或错误码），不可用于获取标题、日期或视频 URL
 - 逐字稿 API 返回的时间戳是毫秒级，需转换为 SRT 格式（HH:MM:SS,mmm）
 
 

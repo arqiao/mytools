@@ -25,6 +25,18 @@
 - 页面文本解析保留为 fallback：修复了"纪要"精确匹配防止误截断时间轴、去除连续重复条目、跳过"模版：主题摘要 会议总结"前缀
 - 新增 `_parse_api_summary()` 函数解析 API 响应为格式化 markdown
 
+### simplify: 精简腾讯会议 API 参数
+- 实测三个 API（query-timeline、query-summary-and-note、minutes/detail）仅需 recording_id + cookies
+- 去掉 meeting_id 和 auth_share_id 参数，浏览器端不再拦截提取 auth_share_id
+
+### simplify: 进一步精简腾讯会议模块
+- 去掉 meeting_id、sharing_id 在 API 调用中的所有残留引用
+- 会议日期改从视频 URL 解析（`TM-YYYYMMDD` 格式），不再依赖页面文本解析
+- 修复 DOM 标题提取 bug（提取到标题但未赋值给变量）
+- 注释掉页面文本解析 fallback（时间轴和纪要），仅保留 API 获取
+- 去掉重复的日期/标题解析代码块
+- `extract_meeting_id()` 重命名为 `extract_sharing_id()`，语义更准确
+
 ## 2025-06
 
 ### 4e74404 — rename: s1_feishu.py → s1_feishumiaoji.py

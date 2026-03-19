@@ -196,9 +196,10 @@ python src/auth.py
 **注意事项**：
 - 同一用户的 cookies 可跨会议复用
 - 视频/音频 URL 包含签名 token，有时效性，需实时获取
-- 纪要和时间轴优先通过 API 获取结构化数据（query-summary-and-note、query-timeline），API 失败时自动 fallback 到页面文本解析
+- 纪要和时间轴通过 API 获取结构化数据（query-summary-and-note、query-timeline）
+- 会议日期从视频 URL 中的 `TM-YYYYMMDD` 格式解析，标题从浏览器 DOM 提取
 - 纪要输出保留层次格式：总结段落 → 加粗编号标题 → 列表子项 → 会议待办
-- API 调用需要 auth_share_id（UUID格式），由浏览器自动从拦截的请求中提取
+- API 仅需 recording_id + cookies，无需 meeting_id 或 auth_share_id
 
 
 ### 知乎训练营
