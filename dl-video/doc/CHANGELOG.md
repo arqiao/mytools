@@ -4,6 +4,41 @@
 
 ## 2026-03
 
+### migrate: s5_addon.py 迁移 — 消除 yitang_addon 跨项目依赖
+- 将 yitang_addon.py（784行）全部功能内联到 s5_addon.py（891行）
+- 去掉 `setup_yitang_path()` 和 `from yitang_addon import ...`
+- 配置从 config.yaml 的 `addon` 节读取（chunk_size、提示词文件名）
+- LLM 配置复用 config.yaml 的 `llm` 节
+- `fetch_feishu_transcript()` 改为调用本地 `url2md.feishu_url_to_md`
+- 新增 3 个提示词文件到 cfg/：prompt-subtitle.md、prompt-discussion.md、prompt-digest.md
+- Pipeline 模式新增讨论区分析和精华摘要能力（原 s5 只做字幕对比）
+- CLI 模式支持全部参数：--subtitle/--transcript/--discussion/--dry-run/--provider/--subtitle-only/--discussion-only/--no-digest
+- main() 合并两种模式：有 --subtitle 走 CLI 模式，否则走 pipeline 模式
+
+### migrate: s4_srt_fix.py 迁移 — 消除 yitang_srt_fix 跨项目依赖
+- 将 yitang_srt_fix.py 全部功能内联到 s4_srt_fix.py
+- 去掉 `setup_yitang_path()` 和 `from yitang_srt_fix import ...`
+- 配置从 config.yaml 的 `srt_fix` 节读取（prompt、chunk_size、custom_dict）
+- 新增 2 个提示词文件到 cfg/：prompt-srtfix-ref.md、prompt-srtfix-noref.md
+- 新增自定义词典 cfg/srtfix-dict.yaml
+- 内联 LLMClient、parse_srt、parse_llm_json、extract_terms_from_transcript 等函数
+
+### rewrite: s3_subtitle.py 重写 — 多引擎字幕生成，消除 yitang 依赖
+- 从 yitang 的 subtitle_from_mp3.py 迁移 Whisper 转写逻辑
+- 新增 4 个云端转写引擎：讯飞、飞书、阿里云、豆包（火山引擎）
+- 支持 CLI 模式（指定音频文件 + 引擎参数）和 pipeline 模式（扫描 output 目录）
+- 引擎后缀映射通过 config.yaml 的 `engine_suffix` 节配置
+- 新增 model_downloader.py 管理 Whisper 模型下载
+- 长音频（>30分钟）自动分段处理，减少内存占用
+- 音频预处理：大文件先转 16kHz WAV（优先 PyAV，fallback ffmpeg）
+- 繁体自动转简体（opencc）
+
+### feat: 新增 url2md.py — 飞书文档 URL 转 Markdown 下载工具
+- 支持飞书 wiki URL 和 docx URL
+- 支持一堂（yitang.top）文档 URL
+- 通过 yitang_wiki.YitangCopier 获取文档 blocks 并转为 markdown
+- CLI 模式：`python src/url2md.py <url> [-o output_path]`
+
 ### feat: 新增知乎训练营视频下载支持 s1_zhihu.py
 - 从 URL 提取 course_id 和 video_id
 - 通过多个 API 端点尝试获取视频播放地址
