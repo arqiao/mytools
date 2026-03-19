@@ -53,25 +53,42 @@ tasks:
 
 ---
 
-### s1_panda.py — 熊猫学院
+### s1_tencentmeeting.py — 腾讯会议
 
-```bash
-python src/s1_panda.py
-```
-
-仅处理 config.yaml 中 `source_type: "panda"` 的任务。
+不单独运行，由 s1_huifang.py 调度（`source_type: "tencent_meeting"`）。
 
 config.yaml 示例：
 ```yaml
 tasks:
-  - source_type: "panda"
-    source_url: "https://fclive.pandacollege.cn/p/9nubG3"
+  - source_type: "tencent_meeting"
+    source_url: "https://meeting.tencent.com/cw/lJayL90E87"
     wiki_url: ""
     title: ""
 ```
 
-凭证：`panda.token`（Bearer JWT，从浏览器 Network 面板获取）
-输出：`.ts` + `.mp3`
+凭证：`tencent_meeting.cookie`（浏览器 cookie，可跨会议复用）
+输出：`.mp4` + `.mp3` + `_ori.srt` + `_abs.md`（纪要含层次格式 + 时间轴，优先 API 获取）
+
+---
+
+### s1_zhihu.py — 知乎训练营
+
+```bash
+python src/s1_zhihu.py
+```
+
+仅处理 `source_type: "zhihu"` 的任务。
+
+config.yaml 示例：
+```yaml
+tasks:
+  - source_type: "zhihu"
+    source_url: "https://www.zhihu.com/training-video/1234567890/9876543210"
+    title: ""
+```
+
+凭证：`zhihu.browser_cookie`（浏览器 cookie）
+输出：`.mp4` + `.mp3`
 
 ---
 
@@ -93,6 +110,28 @@ tasks:
 
 凭证：`xiaoe.browser_cookie`（从浏览器 Cookies 面板复制完整字符串）
 输出：`.mp4` + `.mp3`
+
+---
+
+### s1_panda.py — 熊猫学院
+
+```bash
+python src/s1_panda.py
+```
+
+仅处理 config.yaml 中 `source_type: "panda"` 的任务。
+
+config.yaml 示例：
+```yaml
+tasks:
+  - source_type: "panda"
+    source_url: "https://fclive.pandacollege.cn/p/9nubG3"
+    wiki_url: ""
+    title: ""
+```
+
+凭证：`panda.token`（Bearer JWT，从浏览器 Network 面板获取）
+输出：`.ts` + `.mp3`
 
 ---
 

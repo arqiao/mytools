@@ -2,7 +2,26 @@
 
 ## 项目背景
 
-多平台在线课程回放的自动下载与后处理工具。支持从飞书妙记、熊猫学院、小鹅通、淘宝直播等平台下载课程视频，并通过五步流水线完成从下载到内容提取的全流程自动化。
+多平台在线课程回放的自动下载与后处理工具。
+
+**解决的问题**：
+- 各平台回放视频无统一下载方式，需手动录屏或使用不同工具
+- 部分平台采用 DRM 加密（腾讯云 SimpleAES、HLS AES-128），无法直接下载
+- 缺少字幕或字幕质量差，需人工整理
+- 视频内容与教学文档不同步，补充信息散落各处
+
+**支持平台**（6个）：
+1. **飞书妙记**：双通道认证（Open API + Cookie），支持跨租户
+2. **腾讯会议**：最小化浏览器使用，API获取会议数据（纪要、时间轴、逐字稿）
+3. **知乎训练营**：多 API 端点尝试，雪花算法 ID 时间戳提取
+4. **小鹅通**：HLS AES-128 解密，多域名 cookie 注入
+5. **熊猫学院**：腾讯云 SimpleAES DRM 解密，RSA + AES-CBC 多层加密
+6. **淘宝直播**：螳螂直播 API，双 token 认证
+
+**核心功能**：
+- 五步流水线：视频下载 → 教学文档 → Whisper 字幕 → LLM 修订 → 补充内容提取
+- 统一配置管理：config.yaml（任务配置）+ credentials.yaml（敏感凭证）
+- 自动化处理：飞书 token 自动刷新、失败通知、断点续传
 
 ## 架构设计
 
@@ -10,10 +29,12 @@
 
 ```
 调度器 (s1_huifang.py)
-  ├── 飞书妙记模块 (s1_feishumiaoji.py)
-  ├── 熊猫学院模块 (s1_panda.py)
-  ├── 小鹅通模块   (s1_xiaoe.py)
-  └── 淘宝直播模块 (s1_taobao.py)
+  ├── 飞书妙记模块     (s1_feishumiaoji.py)
+  ├── 腾讯会议模块     (s1_tencentmeeting.py)
+  ├── 知乎训练营模块   (s1_zhihu.py)
+  ├── 小鹅通模块       (s1_xiaoe.py)
+  ├── 熊猫学院模块     (s1_panda.py)
+  └── 淘宝直播模块     (s1_taobao.py)
 
 五步流水线 (run_pipeline.py)
   s1(视频下载) → s2(教学文档) → s3(Whisper字幕) → s4(字幕修订) → s5(生成Addon)
@@ -30,8 +51,10 @@ dl-video/
 │   ├── run_pipeline.py      # 五步流水线调度
 │   ├── s1_huifang.py        # Step1 调度器：按 source_type 分发
 │   ├── s1_feishumiaoji.py   # 飞书妙记下载模块
-│   ├── s1_panda.py          # 熊猫学院下载模块
+│   ├── s1_tencentmeeting.py # 腾讯会议下载模块
+│   ├── s1_zhihu.py          # 知乎训练营下载模块
 │   ├── s1_xiaoe.py          # 小鹅通下载模块
+│   ├── s1_panda.py          # 熊猫学院下载模块
 │   ├── s1_taobao.py         # 淘宝直播下载模块
 │   ├── s2_wiki.py           # Step2: 下载教学文档 + 写入飞书 wiki
 │   ├── s3_subtitle.py       # Step3: MP3 → 字幕（Whisper fallback）
@@ -44,9 +67,23 @@ dl-video/
 
 ## 平台下载模块设计
 
+### 通用设计原则
+
+**回放类URL的解析下载原则**："文本数据优先，大文件最后"
+
+所有平台模块遵循统一的下载顺序策略：
+1. **文本数据优先**：先获取标题、日期、纪要、时间轴、逐字稿等轻量级文本数据
+2. **大文件最后**：视频和音频下载放在最后两步
+3. **快速失败**：文本数据获取失败时立即中断，避免浪费时间下载大文件后才发现问题
+
+优势：
+- 减少无效下载：API 失败或认证过期时，在下载大文件前就能发现
+- 提升用户体验：文本数据秒级返回，用户可快速确认任务是否正常
+- 节省带宽：避免下载几百MB视频后才发现标题或字幕获取失败
+
 ### Step1 调度器 (s1_huifang.py)
 
-读取 `config.yaml` 中的 `tasks` 列表，根据每个任务的 `source_type` 字段分发到对应平台模块。支持的 source_type：`feishu_minutes`、`panda`、`xiaoe`、`taobao`。
+读取 `config.yaml` 中的 `tasks` 列表，根据每个任务的 `source_type` 字段分发到对应平台模块。支持的 source_type：`feishu_minutes`、`tencent_meeting`、`zhihu`、`xiaoe`、`panda`、`taobao`。
 
 ### 飞书妙记 (s1_feishumiaoji.py)
 
@@ -67,6 +104,16 @@ dl-video/
 6. `get_transcript()` — Open API `/minutes/v1/minutes/{token}/transcript` 获取文字记录
 7. `get_transcript_by_cookie()` — Cookie API `/minutes/api/subtitles` fallback（跨租户场景）
 
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **minutes_token** | 直接从URL提取（正则） | URL中明文存在，无需额外请求 | 无 |
+| **标题** | 页面HTML解析（SSR JSON） | 嵌在页面SSR数据中，需解码Unicode转义 | minutes_token + cookie |
+| **视频URL** | 页面HTML解析（SSR JSON） | 飞书内部CDN地址，嵌在SSR数据中 | minutes_token + cookie |
+| **字幕URL** | 页面HTML解析（SSR JSON） | WebVTT格式字幕地址，嵌在SSR数据中 | minutes_token + cookie |
+| **文字记录** | Open API或Cookie API | Open API需user_access_token，跨租户时用Cookie API | minutes_token + (user_access_token 或 cookie) |
+
 **输出文件**：
 - `{title}.ts` — 视频文件
 - `{title}.mp3` — 音频文件
@@ -78,6 +125,172 @@ dl-video/
 - 跨租户妙记（如 waytoagi.feishu.cn）Open API 无权限，需用 browser_cookie 走 Cookie API
 - Cookie API 的 transcript 数据结构与 Open API 不同（`sentences[].contents[]` vs 直接 `text`），需归一化处理
 - 视频下载服务器不一定支持 Range，`download_video()` 检测 status_code==200（非 206）时从头下载
+
+
+### 腾讯会议 (s1_tencentmeeting.py)
+
+**认证方式**：browser_cookie（通过 Playwright 注入）
+
+**信息获取架构**（最小化浏览器使用）：
+1. **直接从 URL 提取**：sharing_id（短代码，如 `lJayL90E87`）
+2. **浏览器提取**：meeting_id（19位，8开头）、recording_id（19位，2开头）、视频URL（含签名token）、cookies
+3. **API 获取**：会议数据（标题、日期、时间轴、纪要）、逐字稿
+
+**关键 ID 说明**：
+- `sharing_id`：URL 中的短代码（支持 `/cw/` 和 `/crm/` 两种格式，后者会重定向到前者）
+- `meeting_id`：会议唯一标识（19位数字，8开头），从页面HTML提取
+- `recording_id`：录制唯一标识（19位数字，2开头），从页面HTML提取
+
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **sharing_id** | 直接从URL提取（正则） | URL中明文存在，无需浏览器 | 无 |
+| **meeting_id** | 浏览器提取（HTML中19位数字，8开头） | 页面动态渲染后才出现，需等待JS执行 | 无 |
+| **recording_id** | 浏览器提取（HTML中19位数字，2开头） | 页面动态渲染后才出现，需等待JS执行 | 无 |
+| **视频URL** | 浏览器提取（`<video>` 标签src） | 包含动态签名token，有时效性，无法通过API获取 | 无 |
+| **cookies** | 浏览器获取 | 用于后续API认证，可跨会议复用 | 无 |
+| **会议标题** | 浏览器提取或API获取 | 浏览器从页面提取，或通过 get-multi-record-info API | sharing_id + cookies |
+| **会议日期** | 浏览器提取或API获取 | 浏览器从页面提取，或通过 get-multi-record-info API | sharing_id + cookies |
+| **时间轴** | API获取（优先）或页面文本解析 | query-timeline API → `data.timeline_info.timeline_infos[]`，start_time为秒数；fallback解析页面文本 | recording_id + meeting_id + auth_share_id + cookies |
+| **会议纪要** | API获取（优先）或页面文本解析 | query-summary-and-note API → `data.deepseek_summary.topic_summary`；fallback解析页面文本 | recording_id + meeting_id + auth_share_id + cookies |
+| **逐字稿** | API获取 | 通过 minutes/detail API，返回毫秒级时间戳 | meeting_id + recording_id + cookies |
+
+**优化要点**：
+- 浏览器只用于提取4个必需项（meeting_id、recording_id、视频URL、cookies），标题和日期也从浏览器页面提取
+- 纪要和时间轴优先通过专用 API（query-summary-and-note、query-timeline）获取结构化数据，API 失败时 fallback 到页面文本解析
+- sharing_id 从URL直接提取，节省浏览器操作
+- cookies 可跨会议复用，避免重复登录
+- API 需要 auth_share_id（UUID格式），从浏览器拦截的 API 请求中提取
+
+**流程**：
+1. `extract_meeting_id(url)` — 从 URL 提取 sharing_id（正则 `/c(?:w|rm)/([A-Za-z0-9]+)`）
+2. `fetch_meeting_page(sharing_id, cookie)` — Playwright 无头浏览器：
+   - 访问 `https://meeting.tencent.com/cw/{sharing_id}`
+   - 等待页面加载，检测登录状态（需要时等待用户扫码）
+   - 从页面HTML提取 meeting_id 和 recording_id（正则匹配19位数字）
+   - 从 `<video>` 标签提取视频URL（含签名token）
+   - 获取浏览器 cookies
+   - 返回 (meeting_id, recording_id, video_url, cookies)
+3. `fetch_meeting_data_via_api(meeting_id, recording_id, auth_share_id, cookies)` — API 获取纪要和时间轴：
+   - `POST /wemeet-tapi/v2/meetlog/public/record-detail/query-timeline` → 时间轴（`data.timeline_info.timeline_infos[]`，start_time为秒数）
+   - `POST /wemeet-tapi/v2/meetlog/public/record-detail/query-summary-and-note` → 纪要（`data.deepseek_summary.topic_summary`）
+   - 需要 auth_share_id（UUID格式，从浏览器拦截的API请求中提取）
+4. `_parse_api_summary(info)` — 将 API 纪要响应解析为格式化 markdown（总结段落 → 加粗标题 → 列表子项 → 会议待办）
+5. `parse_timeline_from_page_text(page_text)` — 页面文本解析时间轴（API fallback），含精确匹配"纪要"防误截断、去重
+6. `parse_summary_from_page_text(page_text)` — 页面文本解析纪要（API fallback），跳过"模版：主题摘要"前缀，保留层次格式
+7. `fetch_transcript_via_api(meeting_id, recording_id, cookies)` — API 获取逐字稿：
+   - `GET /wemeet-cloudrecording-webapi/v1/minutes/detail` → 逐字稿数据（带时间戳）
+   - 需要 meeting_id 和 recording_id 参数
+8. `parse_transcript_to_srt(transcript_lines)` — 将逐字稿转换为SRT格式（毫秒级时间戳）
+9. `generate_abs_md(summary, timeline)` — 生成摘要markdown（纪要 + 时间轴）
+10. `download_video(video_url, output_path, cookies)` — 流式下载视频（带进度显示）
+11. `extract_audio(video_path, audio_path)` — ffmpeg 从视频提取音频
+12. `safe_filename(title)` — 清理文件名中的非法字符（Windows兼容）
+13. `process_tencent_meeting(task, config, creds)` — 主入口函数，协调上述流程
+
+**输出文件**：
+- `{date_prefix}{title}.mp4` — 视频文件
+- `{date_prefix}{title}.mp3` — 音频文件
+- `{date_prefix}{title}_ori.srt` — 逐字稿字幕（毫秒级时间戳）
+- `{date_prefix}{title}_abs.md` — 会议摘要（纪要 + 时间轴）
+
+**踩坑记录**：
+- URL 有两种格式（`/cw/` 和 `/crm/`），需同时支持
+- sharing_id 可直接从 URL 提取，无需浏览器
+- 媒体 URL 的签名 token 是动态生成的，有时效性，必须从页面实时获取
+- 不同会议的 token 不同，无法复用
+- 同一用户的 cookies 可跨会议复用，避免重复登录
+- 纪要/时间轴 API（query-summary-and-note、query-timeline）需要 auth_share_id（UUID格式），从浏览器拦截的 API 请求 URL 中提取
+- 时间轴 API 的 start_time 是秒数（非毫秒），如 253 对应 00:04:13
+- 页面文本解析时间轴时，"纪要"作为结束标记需精确匹配（`line == '纪要'`），因为它也出现在 UI tab 标签中
+- 页面文本解析纪要时，需跳过"模版：主题摘要 会议总结"前缀（skip 前2行）
+- get-multi-record-info 和 uni-record-id API 在浏览器外部无法正常工作（返回空数据），标题和日期仍需从浏览器页面提取
+- 逐字稿 API 返回的时间戳是毫秒级，需转换为 SRT 格式（HH:MM:SS,mmm）
+
+
+### 知乎训练营 (s1_zhihu.py)
+
+**认证方式**：browser_cookie
+
+**流程**：
+1. `fetch_page_info(page_url, cookie)` — 从知乎训练营页面提取信息：
+   - 从 URL 提取 course_id 和 video_id（正则 `/training-video/(\d+)/(\d+)`）
+   - 调用 catalog API 获取发布日期（`/api/education/training/{course_id}/video_page/catalog`）
+   - 调用 course API 获取课程标题（`/api/education/training/course/{course_id}`）
+   - 尝试多个 API 端点获取视频播放地址（play_info、video_page 等）
+   - 如果 API 失败，使用 Playwright 访问页面并拦截 m3u8 请求
+2. `download_video(video_url, output_path)` — ffmpeg 直接下载 HLS（`-c copy -bsf:a aac_adtstoasc`）
+3. `extract_audio(video_path, audio_path)` — ffmpeg 提取 MP3
+
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **course_id** | 直接从URL提取（正则） | URL路径中包含课程ID | 无 |
+| **video_id** | 直接从URL提取（正则） | URL路径中包含视频ID（雪花算法生成） | 无 |
+| **发布日期** | API获取（catalog）或从video_id提取 | 优先从catalog API获取，失败时从雪花ID位运算提取时间戳 | course_id + cookie |
+| **课程标题** | API获取（course） | 课程基本信息 | course_id + cookie |
+| **视频URL** | API获取或浏览器拦截 | 优先尝试多个API端点，失败时用Playwright拦截m3u8 | video_id + cookie |
+
+**输出文件**：
+- `{date_prefix}{title}.mp4` — 视频文件
+- `{date_prefix}{title}.mp3` — 音频文件
+
+**踩坑记录**：
+- 知乎视频播放地址有多个可能的 API 端点，需依次尝试
+- 发布日期优先从 catalog API 获取，失败时从 video_id（雪花算法）提取
+- 部分视频需要 Playwright 拦截 m3u8 请求才能获取播放地址
+- video_id 是雪花算法生成的，可通过位运算提取时间戳
+
+
+### 小鹅通 (s1_xiaoe.py)
+
+**认证方式**：browser_cookie（通过 Playwright 注入到多个小鹅通域名）
+
+**流程**：
+1. `fetch_page_info(page_url, cookie_str)` — Playwright 无头浏览器：
+   - 从 URL 提取 app_id（正则 `(app\w+)\.h5\.`）
+   - 为所有小鹅通域名预设 cookie（`.xiaoecloud.com`、`.xiaoeknow.com`、`.xiaoe-tech.com`、`.xet.citv.cn`）
+   - 监听 `page.on("request")` 拦截含 `.m3u8` 的请求 URL
+   - 检测登录跳转（`/login/auth`），从 redirect_url 提取真实 app_id 并补充 cookie
+   - 等待 12 秒让 SPA 加载视频播放器
+   - 返回 (title, m3u8_url)
+2. `download_m3u8(m3u8_url, referer)` — 下载 m3u8 内容，校验签名有效性
+3. `fetch_aes_key(key_url)` — 从 key server 获取 16 字节 AES-128 密钥
+4. 分支处理：
+   - **有 AES 加密**：`download_video()` → `parse_ts_urls()` 提取分片 URL → `download_and_decrypt_segments()` 逐片下载 + AES-128-CBC 解密 + PKCS7 去填充 → 合并 TS → `remux_ts_to_mp4()` 转封装
+   - **无加密**：`ffmpeg_download_hls()` 直接 ffmpeg 下载
+5. `extract_audio()` — ffmpeg 提取 MP3
+
+**AES-128 解密细节**：
+- 标准 HLS AES-128-CBC 加密，m3u8 中 `#EXT-X-KEY:METHOD=AES-128,URI="..."` 指定 key URL
+- IV 从 m3u8 的 `IV=0x...` 提取，无 IV 字段时默认全零 16 字节
+- 每个 TS 分片独立解密：`AES-CBC(key, iv)` → 去 PKCS7 填充（`pad_len = decrypted[-1]`）
+- 解密后直接拼接写入单个 TS 文件，再 ffmpeg remux 为 MP4（`-c copy -bsf:a aac_adtstoasc`）
+
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **app_id** | 直接从URL提取（正则） | URL域名中包含app_id，用于设置cookie域 | 无 |
+| **标题** | 浏览器提取（page.title） | SPA页面动态渲染，需等待JS执行 | cookie |
+| **日期** | 页面内容解析或当前日期 | 尝试从页面HTML提取日期，失败时用当前日期 | cookie |
+| **m3u8 URL** | 浏览器拦截网络请求 | SPA加载时发起m3u8请求，需监听network | cookie |
+| **AES密钥** | HTTP请求key server | m3u8中指定的key URL，返回16字节密钥 | m3u8 URL |
+| **视频分片** | HTTP下载+解密 | m3u8中的TS分片URL，需AES-128-CBC解密 | m3u8 URL + AES密钥 |
+
+**输出文件**：
+- `{title}.mp4` — 视频文件（remux 后）
+- `{title}.mp3` — 音频文件
+
+**踩坑记录**：
+- 小鹅通有多个域名后缀（xiaoecloud/xiaoeknow/xiaoe-tech/xet.citv.cn），cookie 必须注入到所有域名，否则 SPA 加载时跨域请求无认证
+- 页面可能跳转到 `/login/auth`，需从 redirect_url 解析真实 app_id 再补充 cookie 并重新导航
+- m3u8 URL 含签名参数（`whref`），有时效性，过期返回 "sign not match"
+- TS 分片下载有重试机制（3 次，指数退避 2s/4s/6s），应对 CDN 偶发超时
+- remux 时必须加 `-bsf:a aac_adtstoasc`，否则 MP4 容器中的 AAC 音频流格式不兼容
+
 
 ### 熊猫学院 (s1_panda.py)
 
@@ -128,6 +341,18 @@ dl-video/
 - `VOD_APPID = 1254019786`（腾讯云 VOD appId，从 ts URL 路径确认）
 - RSA 公钥：tcplayer 硬编码的 1024-bit RSA 公钥（`RSA_PUB_KEY_B64`）
 
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **shortLink** | 直接从URL提取（正则） | URL中明文存在，支持3种格式 | 无 |
+| **inviteId** | API获取（getInviteMsg） | 通过shortLink换取邀请ID | shortLink + Bearer token |
+| **课程标题** | API获取（getCourse） | 课程基本信息，包含标题和视频ID | inviteId + Bearer token |
+| **liveRoomId** | API获取（getLiveRoom） | 直播间ID，用于获取播放签名 | inviteId + inviteUserId + Bearer token |
+| **psign** | API获取（getVideoSign） | 腾讯云VOD播放签名，有时效性 | liveRoomId + Bearer token |
+| **DRM密钥** | 多步计算获取 | 需RSA加密overlay key，调用getplayinfo/v4，再从license解密 | psign + fileId + 自生成overlay key |
+| **视频分片** | CDN下载+解密 | m3u8指向的加密TS分片，需用真实AES key解密 | DRM密钥 + m3u8 URL |
+
 **输出文件**：
 - `{title}.ts` — 视频文件
 - `{title}.mp3` — 音频文件
@@ -139,41 +364,6 @@ dl-video/
 - 分片下载支持续传：`_tmp_{stem}/` 临时目录存放已解密分片，中断后重新运行跳过已有分片
 - 临时目录仅在 ffmpeg concat 成功后才 `shutil.rmtree` 清理，避免合并失败丢失已下载数据
 
-### 小鹅通 (s1_xiaoe.py)
-
-**认证方式**：browser_cookie（通过 Playwright 注入到多个小鹅通域名）
-
-**流程**：
-1. `fetch_page_info(page_url, cookie_str)` — Playwright 无头浏览器：
-   - 从 URL 提取 app_id（正则 `(app\w+)\.h5\.`）
-   - 为所有小鹅通域名预设 cookie（`.xiaoecloud.com`、`.xiaoeknow.com`、`.xiaoe-tech.com`、`.xet.citv.cn`）
-   - 监听 `page.on("request")` 拦截含 `.m3u8` 的请求 URL
-   - 检测登录跳转（`/login/auth`），从 redirect_url 提取真实 app_id 并补充 cookie
-   - 等待 12 秒让 SPA 加载视频播放器
-   - 返回 (title, m3u8_url)
-2. `download_m3u8(m3u8_url, referer)` — 下载 m3u8 内容，校验签名有效性
-3. `fetch_aes_key(key_url)` — 从 key server 获取 16 字节 AES-128 密钥
-4. 分支处理：
-   - **有 AES 加密**：`download_video()` → `parse_ts_urls()` 提取分片 URL → `download_and_decrypt_segments()` 逐片下载 + AES-128-CBC 解密 + PKCS7 去填充 → 合并 TS → `remux_ts_to_mp4()` 转封装
-   - **无加密**：`ffmpeg_download_hls()` 直接 ffmpeg 下载
-5. `extract_audio()` — ffmpeg 提取 MP3
-
-**AES-128 解密细节**：
-- 标准 HLS AES-128-CBC 加密，m3u8 中 `#EXT-X-KEY:METHOD=AES-128,URI="..."` 指定 key URL
-- IV 从 m3u8 的 `IV=0x...` 提取，无 IV 字段时默认全零 16 字节
-- 每个 TS 分片独立解密：`AES-CBC(key, iv)` → 去 PKCS7 填充（`pad_len = decrypted[-1]`）
-- 解密后直接拼接写入单个 TS 文件，再 ffmpeg remux 为 MP4（`-c copy -bsf:a aac_adtstoasc`）
-
-**输出文件**：
-- `{title}.mp4` — 视频文件（remux 后）
-- `{title}.mp3` — 音频文件
-
-**踩坑记录**：
-- 小鹅通有多个域名后缀（xiaoecloud/xiaoeknow/xiaoe-tech/xet.citv.cn），cookie 必须注入到所有域名，否则 SPA 加载时跨域请求无认证
-- 页面可能跳转到 `/login/auth`，需从 redirect_url 解析真实 app_id 再补充 cookie 并重新导航
-- m3u8 URL 含签名参数（`whref`），有时效性，过期返回 "sign not match"
-- TS 分片下载有重试机制（3 次，指数退避 2s/4s/6s），应对 CDN 偶发超时
-- remux 时必须加 `-bsf:a aac_adtstoasc`，否则 MP4 容器中的 AAC 音频流格式不兼容
 
 ### 淘宝直播 (s1_taobao.py)
 
@@ -196,6 +386,17 @@ dl-video/
 5. `download_video(m3u8_url, output_path)` — ffmpeg 直接下载 HLS（`-c copy -bsf:a aac_adtstoasc`）
 6. `extract_audio(video_path, audio_path)` — ffmpeg 提取 MP3（`-err_detect ignore_err` 容错）
 
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 原因 | 依赖 |
+|------|----------|------|------|
+| **companyId** | 直接从URL提取（正则） | URL域名中包含公司ID | 无 |
+| **linkCode** | 直接从URL提取（正则） | URL路径中的十六进制代码 | 无 |
+| **courseId** | API获取（getParamByCode） | 通过linkCode解析得到课程ID | linkCode + Bearer token |
+| **课程标题** | API获取（selectCourseInfo） | 课程详细信息，包含标题和直播ID | courseId + companyId + unionId + Bearer token |
+| **liveId** | API获取（selectCourseInfo） | 直播间ID，用于获取回放地址 | courseId + Bearer token |
+| **m3u8 URL** | API获取（agora/live/video） | 回放视频地址，返回3条CDN线路 | liveId + Bearer token |
+
 **输出文件**：
 - `{title}.mp4` — 视频文件
 - `{title}.mp3` — 音频文件
@@ -205,6 +406,7 @@ dl-video/
 - agora/live/video 返回 3 条 CDN 线路（domain/volcanoUrl/huaweiUrl），优先选 domain
 - 部分直播 mediaType 参数不支持 "PC"，需去掉该参数重试
 - ffmpeg 下载超时设为 1800s（30 分钟），音频提取加 `-err_detect ignore_err` 容忍视频流中的小错误
+
 
 ## 五步流水线设计
 

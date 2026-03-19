@@ -52,6 +52,12 @@ tasks:
     target_wiki_url: ""           # 写入目标 wiki（s2 用，留空不写入）
     title: ""                     # 手动标题（留空自动获取）
 
+  - source_type: "tencent_meeting"
+    source_url: "https://meeting.tencent.com/cw/lJayL90E87"  # 支持 /cw/ 和 /crm/ 两种格式
+    wiki_url: ""
+    target_wiki_url: ""
+    title: ""
+
   - source_type: "panda"
     source_url: "https://fclive.pandacollege.cn/p/9nubG3"
     wiki_url: "https://forchangesz.feishu.cn/wiki/xxx"
@@ -65,6 +71,12 @@ tasks:
 
   - source_type: "taobao"
     source_url: "https://81025.tbkflow.cn/pcLive/xxx?f=xxx"
+    wiki_url: ""
+    target_wiki_url: ""
+    title: ""
+
+  - source_type: "zhihu"
+    source_url: "https://www.zhihu.com/training-video/1234567/8901234"
     wiki_url: ""
     target_wiki_url: ""
     title: ""
@@ -83,7 +95,7 @@ whisper:
 ```
 
 **字段说明**：
-- `source_type`：决定调用哪个下载模块（`feishu_minutes`/`panda`/`xiaoe`/`taobao`）
+- `source_type`：决定调用哪个下载模块（`feishu_minutes`/`tencent_meeting`/`panda`/`xiaoe`/`taobao`/`zhihu`）
 - `source_url`：各平台的视频/回放页面 URL（格式见下方各平台说明）
 - `wiki_url`：关联的飞书 wiki 教学文档，s2 步骤下载为 `_wiki.md`
 - `target_wiki_url`：s2 步骤将处理结果写入此飞书 wiki（留空则不写入）
@@ -104,6 +116,9 @@ feishu:
   user_token_expire_time: 1234567890   # 自动更新
   browser_cookie: "session=xxx; ..."   # 手动从浏览器复制
 
+tencent_meeting:
+  cookie: "wm_login_sid=xxx; ..."      # 浏览器 cookie（用于认证和API调用）
+
 panda:
   token: "eyJhbGciOiJIUzI1NiJ9..."     # JWT Bearer token
 
@@ -116,6 +131,9 @@ taobao:
   company_id: "81025"                  # 从 URL 中的数字提取
   union_id: "xxx"                      # 可选
   api_base: "https://cg.infyrasys.cn"  # API 基础地址
+
+zhihu:
+  browser_cookie: "z_c0=xxx; ..."      # 浏览器 cookie
 
 minimax:
   api_key: "xxx"                       # s4/s5 LLM 调用
@@ -150,20 +168,58 @@ python src/auth.py
 - `output/{title}_ori.srt` — 字幕（VTT 转 SRT，或 transcript 生成）
 - `output/{title}_ori.md` — 文字记录（带说话人标注）
 
-### 熊猫学院
 
-**URL 格式**：`https://fclive.pandacollege.cn/p/{shortLink}`
-- 也支持 `?param={shortLink}` 和 `/playback/{shortLink}` 格式
+### 腾讯会议
+
+**URL 格式**：`https://meeting.tencent.com/cw/{sharing_id}` 或 `https://meeting.tencent.com/crm/{sharing_id}`
+- 示例：`https://meeting.tencent.com/cw/lJayL90E87`
+- `/crm/` 格式会自动重定向到 `/cw/`
 
 **认证获取**：
-1. 浏览器打开回放页面
-2. F12 → Network → 筛选 `pandacollege` 域名的请求
-3. 点击任意 API 请求 → Headers → `Authorization: Bearer eyJhbG...`
-4. 复制 `eyJhbG...` 部分到 `credentials.yaml` 的 `panda.token`
+1. 浏览器打开会议回放页面，确认视频正常播放
+2. F12 → Application → Cookies → 选择 `.meeting.tencent.com` 域名
+3. 复制所有 cookie 为字符串（`name1=value1; name2=value2; ...`）
+4. 粘贴到 `credentials.yaml` 的 `tencent_meeting.cookie`
+
+**首次运行**：
+- 如果检测到需要登录，程序会打开浏览器窗口并等待15秒
+- 在浏览器中扫码或使用其他方式登录
+- 登录成功后程序自动继续，cookies 会被保存
+- 后续处理其他会议时可复用 cookies，无需重复登录
 
 **输出文件**：
-- `output/{title}.ts` — 视频（DRM 解密后）
-- `output/{title}.mp3` — 音频
+- `output/{date_prefix}{title}.mp4` — 视频
+- `output/{date_prefix}{title}.mp3` — 音频（直接从网页提取，非转码）
+- `output/{date_prefix}{title}_ori.srt` — 逐字稿字幕（毫秒级时间戳）
+- `output/{date_prefix}{title}_abs.md` — 会议摘要（纪要 + 时间轴）
+
+**注意事项**：
+- 同一用户的 cookies 可跨会议复用
+- 视频/音频 URL 包含签名 token，有时效性，需实时获取
+- 纪要和时间轴优先通过 API 获取结构化数据（query-summary-and-note、query-timeline），API 失败时自动 fallback 到页面文本解析
+- 纪要输出保留层次格式：总结段落 → 加粗编号标题 → 列表子项 → 会议待办
+- API 调用需要 auth_share_id（UUID格式），由浏览器自动从拦截的请求中提取
+
+
+### 知乎训练营
+
+**URL 格式**：`https://www.zhihu.com/training-video/{course_id}/{video_id}`
+- 示例：`https://www.zhihu.com/training-video/1234567890/9876543210`
+
+**认证获取**：
+1. 浏览器打开训练营视频页面
+2. F12 → Application → Cookies → 选择 `.zhihu.com` 域名
+3. 复制所有 cookie 为字符串（`name1=value1; name2=value2; ...`）
+4. 粘贴到 `credentials.yaml` 的 `zhihu.browser_cookie`
+
+**输出文件**：
+- `output/{date_prefix}{title}.mp4` — 视频
+- `output/{date_prefix}{title}.mp3` — 音频
+
+**注意事项**：
+- 发布日期从 catalog API 自动获取，用于文件名前缀
+- 如果 API 获取视频地址失败，会自动使用 Playwright 拦截 m3u8 请求
+
 
 ### 小鹅通
 
@@ -181,6 +237,23 @@ python src/auth.py
 **输出文件**：
 - `output/{title}.mp4` — 视频（解密 + remux 后）
 - `output/{title}.mp3` — 音频
+
+
+### 熊猫学院
+
+**URL 格式**：`https://fclive.pandacollege.cn/p/{shortLink}`
+- 也支持 `?param={shortLink}` 和 `/playback/{shortLink}` 格式
+
+**认证获取**：
+1. 浏览器打开回放页面
+2. F12 → Network → 筛选 `pandacollege` 域名的请求
+3. 点击任意 API 请求 → Headers → `Authorization: Bearer eyJhbG...`
+4. 复制 `eyJhbG...` 部分到 `credentials.yaml` 的 `panda.token`
+
+**输出文件**：
+- `output/{title}.ts` — 视频（DRM 解密后）
+- `output/{title}.mp3` — 音频
+
 
 ### 淘宝直播
 

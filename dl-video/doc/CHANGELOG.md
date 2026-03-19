@@ -2,6 +2,29 @@
 
 按时间倒序排列，基于 git log 整理。
 
+## 2026-03
+
+### feat: 新增知乎训练营视频下载支持 s1_zhihu.py
+- 从 URL 提取 course_id 和 video_id
+- 通过多个 API 端点尝试获取视频播放地址
+- 从 catalog API 自动获取发布日期，用于文件名前缀
+- API 失败时自动使用 Playwright 拦截 m3u8 请求
+- 支持从 video_id（雪花算法）提取时间戳作为备选日期
+
+### feat: 新增腾讯会议回放下载支持 s1_tencentmeeting.py
+- 最小化浏览器使用：sharing_id 直接从 URL 提取，浏览器仅提取 meeting_id、recording_id 和媒体 URL
+- 通过 API 获取会议数据（标题、日期、时间轴、纪要）和逐字稿，避免不稳定的页面解析
+- 支持 `/cw/` 和 `/crm/` 两种 URL 格式
+- 音频直接从网页提取，无需 ffmpeg 转码
+- 输出毫秒级时间戳字幕和会议摘要
+- cookies 可跨会议复用，避免重复登录
+
+### improve: 腾讯会议纪要和时间轴改用 API 获取
+- 纪要通过 query-summary-and-note API 获取结构化数据（deepseek_summary.topic_summary），保留层次格式（总结段落 → 加粗编号标题 → 列表子项 → 会议待办）
+- 时间轴通过 query-timeline API 获取（timeline_info.timeline_infos[]），start_time 为秒数
+- 页面文本解析保留为 fallback：修复了"纪要"精确匹配防止误截断时间轴、去除连续重复条目、跳过"模版：主题摘要 会议总结"前缀
+- 新增 `_parse_api_summary()` 函数解析 API 响应为格式化 markdown
+
 ## 2025-06
 
 ### 4e74404 — rename: s1_feishu.py → s1_feishumiaoji.py
