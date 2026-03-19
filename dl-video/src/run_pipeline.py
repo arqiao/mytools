@@ -3,6 +3,10 @@
 五步流水线脚本
 依次执行：s1 → s2 → s3 → s4 → s5
 每个 step 输出日志到 log-err 目录，错误时通知到飞书 debug 群
+
+用法：
+  python run_pipeline.py                    # 从 S1 开始执行完整流水线
+  python run_pipeline.py /path/to/audio.mp3  # 从 S3 开始，跳过 S1/S2
 """
 
 import io
@@ -203,13 +207,66 @@ def run_step(step_id, step_name, script_path):
 
 
 def main():
+    """解析命令行参数：
+    -s2         : 从 S2 开始执行（参数取自配置文件）
+    <mp3_path>  : 从 S3 开始执行，传入 MP3 文件路径
+    <srt_path>  : 从 S4 开始执行，传入 SRT 文件路径（不含 _fix）
+    <fix_srt>   : 从 S5 开始执行，传入 _fix.srt 文件路径
+    """
+    # 解析命令行参数
+    start_step = "s1"
+    input_file = None
+    input_type = None  # "mp3", "srt", "fix_srt"
+
+    for arg in sys.argv[1:]:
+        if arg == "-s2":
+            start_step = "s2"
+            print(f"[INFO] 从 S2 开始执行（参数取自配置文件）")
+        else:
+            input_file = arg.strip()
+            if input_file:
+                # 检查文件类型
+                if input_file.lower().endswith(".mp3"):
+                    start_step = "s3"
+                    input_type = "mp3"
+                    print(f"[INFO] 从 S3 开始执行: MP3={input_file}")
+                elif "_fix.srt" in input_file.lower():
+                    start_step = "s5"
+                    input_type = "fix_srt"
+                    print(f"[INFO] 从 S5 开始执行: _fix.srt={input_file}")
+                elif input_file.lower().endswith(".srt"):
+                    start_step = "s4"
+                    input_type = "srt"
+                    print(f"[INFO] 从 S4 开始执行: SRT={input_file}")
+                else:
+                    print(f"[警告] 未识别的文件类型: {input_file}")
+
     print(f"{'='*60}")
     print("五步流水线开始")
     print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
     creds = load_credentials()
-    creds = ensure_token(creds)  # 确保 token 有效
+
+    # 设置环境变量供后续步骤使用
+    if input_file and input_type:
+        input_path = Path(input_file)
+        # 从文件名提取标题（去掉后缀作为默认标题）
+        default_title = input_path.stem
+        # 去掉可能的 _ori、_wm、_fix 后缀
+        for suffix in ["_ori", "_wm", "_fix"]:
+            if default_title.endswith(suffix):
+                default_title = default_title[:-len(suffix)]
+                break
+
+        os.environ["DL_VIDEO_INPUT_FILE"] = str(input_path.absolute())
+        os.environ["DL_VIDEO_INPUT_TYPE"] = input_type
+        os.environ["DL_VIDEO_DEFAULT_TITLE"] = default_title
+        print(f"[INFO] 输入标题: {default_title}")
+    else:
+        # 确保 token 有效（仅在全流程模式需要）
+        creds = ensure_token(creds)
+
     feishu_token = get_feishu_token(creds)
 
     # 读取 config.yaml 获取任务信息
@@ -232,7 +289,16 @@ def main():
     creds = load_credentials()
     feishu_token = get_feishu_token(creds)
 
-    for step_id, step_name, script_path in STEPS:
+    # 确定起始步骤的索引
+    step_indices = {"s1": 0, "s2": 1, "s3": 2, "s4": 3, "s5": 4}
+    start_index = step_indices.get(start_step, 0)
+
+    for i, (step_id, step_name, script_path) in enumerate(STEPS):
+        # 跳过起始步骤之前的步骤
+        if i < start_index:
+            print(f"\n⏭️ 跳过 Step {step_id} ({step_name})")
+            continue
+
         script = PROJECT_DIR / script_path
         if not script.exists():
             error = f"脚本不存在: {script}"

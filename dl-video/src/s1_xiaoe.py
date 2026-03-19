@@ -80,8 +80,8 @@ def extract_m3u8_url(source_url: str) -> str:
     raise ValueError(f"无法解析小鹅通 URL: {source_url}")
 
 
-def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str]:
-    """用 Playwright + cookie 同时获取标题和 m3u8 URL，返回 (title, m3u8_url)"""
+def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
+    """用 Playwright + cookie 同时获取标题、日期和 m3u8 URL，返回 (title, date_str, m3u8_url)"""
     from playwright.sync_api import sync_playwright
     import time as _time
 
@@ -159,12 +159,32 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str]:
             log.warning("页面仍在加载，跳过内容检查")
 
         title = page.title().strip()
+
+        # 提取日期（尝试从页面内容中查找日期）
+        date_str = ""
+        try:
+            content = page.content()
+            # 尝试匹配常见日期格式：2024/03/14, 2024-03-14, 03/14等
+            date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', content)
+            if date_match:
+                year, month, day = date_match.groups()
+                date_str = f"{year[2:]}{int(month):02d}{int(day):02d}"
+        except:
+            pass
+
+        # 如果没有提取到日期，使用当前日期
+        if not date_str:
+            from datetime import datetime
+            now = datetime.now()
+            date_str = now.strftime("%y%m%d")
+
         browser.close()
 
     m3u8_url = m3u8_found[0] if m3u8_found else ""
     log.info(f"标题: {title}")
+    log.info(f"日期: {date_str}")
     log.info(f"m3u8: {m3u8_url[:80]}...")
-    return title, m3u8_url
+    return title, date_str, m3u8_url
 
 
 def download_m3u8(m3u8_url: str, referer: str = "") -> str:
@@ -396,23 +416,23 @@ def process_xiaoe(task, config, creds):
     referer = f"{parsed.scheme}://{parsed.netloc}/"
     log.info(f"处理小鹅通视频: {page_url}")
 
-    # 1. 用 Playwright 获取标题 + m3u8 URL
+    # 1. 用 Playwright 获取标题 + 日期 + m3u8 URL
     cookie_str = creds.get("xiaoe", {}).get("browser_cookie", "")
     if not cookie_str:
         raise ValueError("credentials.yaml 中缺少 xiaoe.browser_cookie")
-    title, m3u8_url = fetch_page_info(page_url, cookie_str)
+    title, date_prefix, m3u8_url = fetch_page_info(page_url, cookie_str)
     if not m3u8_url:
         raise RuntimeError("未能从页面捕获 m3u8 URL，请确认视频正常播放")
 
     # 2. 下载 m3u8
     m3u8_text = download_m3u8(m3u8_url, referer)
 
-    # 3. 确定文件名
+    # 3. 确定文件名（添加日期前缀）
     if not title:
         fid_match = re.search(r'fileId=(\d+)', m3u8_text)
         title = f"xiaoe_{fid_match.group(1)}" if fid_match else "xiaoe_video"
         log.warning(f"标题为空，使用默认名: {title}")
-    base_name = safe_filename(title)
+    base_name = f"{date_prefix}-{safe_filename(title)}"
     video_path = OUTPUT_DIR / f"{base_name}.mp4"
 
     # 4. 下载视频：有 AES 加密则手动解密，否则 ffmpeg 直接下载

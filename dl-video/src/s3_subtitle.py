@@ -88,51 +88,42 @@ def generate_whisper_subtitle(audio_path, output_dir, base_name, config):
     return wm_srt
 
 
-def get_task_title(task, config, creds):
-    """获取任务标题"""
-    manual_title = task.get("title", "")
-    if manual_title:
-        return manual_title
-
-    source_type = task.get("source_type", "")
-    if source_type == "feishu_minutes":
-        from s1_huifang import extract_minutes_token, get_minutes_info
-        from s1_huifang import ensure_feishu_token
-        import requests
-        session = requests.Session()
-        token = extract_minutes_token(task["source_url"])
-        user_token = ensure_feishu_token(creds, session)
-        title, _ = get_minutes_info(token, user_token, session)
-        return title
-
-    return "untitled"
-
-
 def main():
+    import os
+
     config, creds = load_config()
     setup_yitang_path(config)
 
-    tasks = config.get("tasks", [])
-    if not tasks:
-        log.warning("config.yaml 中无任务")
-        return
+    # 检查是否有环境变量传入的文件
+    input_file = os.environ.get("DL_VIDEO_INPUT_FILE", "")
+    input_type = os.environ.get("DL_VIDEO_INPUT_TYPE", "")
+    mp3_input = input_file if input_type == "mp3" else ""
 
-    output_dir = PROJECT_DIR / config.get("output_dir", "output")
-    output_dir.mkdir(exist_ok=True)
+    # 确定输出目录
+    if mp3_input:
+        mp3_path = Path(mp3_input)
+        output_dir = mp3_path.parent
+        log.info(f"MP3 输入模式，输出目录: {output_dir}")
+        mp3_files = [mp3_path]
+    else:
+        output_dir = PROJECT_DIR / config.get("output_dir", "output")
+        output_dir.mkdir(exist_ok=True)
+        # 扫描 output 目录中的所有 .mp3 文件
+        mp3_files = sorted(output_dir.glob("*.mp3"))
+        if not mp3_files:
+            log.warning(f"未找到 MP3 文件: {output_dir}")
+            return
 
-    for i, task in enumerate(tasks):
-        log.info(f"=== 任务 {i+1}/{len(tasks)} ===")
-        title = get_task_title(task, config, creds)
-        base_name = safe_filename(title)
+    for i, mp3_path in enumerate(mp3_files):
+        log.info(f"=== 任务 {i+1}/{len(mp3_files)} ===")
+        base_name = mp3_path.stem
 
         # 检查是否已有字幕
         if has_subtitle(output_dir, base_name):
             log.info("已有原始字幕，无需 Whisper 转写")
             continue
 
-        # 用 Whisper 生成字幕
-        audio_path = output_dir / f"{base_name}.mp3"
-        result = generate_whisper_subtitle(audio_path, output_dir, base_name, config)
+        result = generate_whisper_subtitle(mp3_path, output_dir, base_name, config)
         if result:
             log.info(f"Whisper 字幕生成完成: {result}")
         else:

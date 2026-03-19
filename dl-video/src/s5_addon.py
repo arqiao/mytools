@@ -141,44 +141,44 @@ def run_addon(srt_path, wiki_path, output_dir, base_name, config, creds):
     return output_dir / f"{base_name}_addon.md"
 
 
-def get_task_title(task, config, creds):
-    manual_title = task.get("title", "")
-    if manual_title:
-        return manual_title
-    source_type = task.get("source_type", "")
-    if source_type == "feishu_minutes":
-        from s1_huifang import extract_minutes_token, get_minutes_info
-        from s1_huifang import ensure_feishu_token
-        import requests
-        session = requests.Session()
-        token = extract_minutes_token(task["source_url"])
-        user_token = ensure_feishu_token(creds, session)
-        title, _ = get_minutes_info(token, user_token, session)
-        return title
-    return "untitled"
-
-
 def main():
+    import os
     config, creds = load_config()
     setup_yitang_path(config)
 
-    tasks = config.get("tasks", [])
-    if not tasks:
-        log.warning("config.yaml 中无任务")
-        return
+    # 检查是否有环境变量传入的文件
+    input_file = os.environ.get("DL_VIDEO_INPUT_FILE", "")
+    input_type = os.environ.get("DL_VIDEO_INPUT_TYPE", "")
+    fix_srt_input = input_file if input_type == "fix_srt" else ""
 
-    output_dir = PROJECT_DIR / config.get("output_dir", "output")
-    output_dir.mkdir(exist_ok=True)
+    # 确定输出目录
+    if fix_srt_input:
+        fix_path_provided = Path(fix_srt_input)
+        output_dir = fix_path_provided.parent
+        log.info(f"_fix.srt 输入模式，输出目录: {output_dir}")
+        fix_files = [fix_path_provided]
+    else:
+        output_dir = PROJECT_DIR / config.get("output_dir", "output")
+        output_dir.mkdir(exist_ok=True)
+        # 扫描 output 目录中的 _ori_fix.srt 和 _wm_fix.srt 文件
+        fix_files = sorted(output_dir.glob("*_ori_fix.srt")) + sorted(output_dir.glob("*_wm_fix.srt"))
+        if not fix_files:
+            log.warning(f"未找到修订字幕文件: {output_dir}")
+            return
 
-    for i, task in enumerate(tasks):
-        log.info(f"=== 任务 {i+1}/{len(tasks)} ===")
-        title = get_task_title(task, config, creds)
-        base_name = safe_filename(title)
+    for i, srt_path in enumerate(fix_files):
+        log.info(f"=== 任务 {i+1}/{len(fix_files)} ===")
 
-        srt_path = find_fix_subtitle(output_dir, base_name)
-        if not srt_path:
-            log.warning(f"未找到字幕文件: {base_name}")
+        if not srt_path.exists():
+            log.warning(f"_fix.srt 文件不存在: {srt_path}")
             continue
+
+        # 提取 base_name（去掉 _ori_fix 或 _wm_fix 后缀）
+        base_name = srt_path.stem
+        for suffix in ["_ori_fix", "_wm_fix"]:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
+                break
 
         # 检查是否已有 addon
         addon_path = output_dir / f"{base_name}_addon.md"
