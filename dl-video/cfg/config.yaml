@@ -9,8 +9,14 @@ tasks:
   #   target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
+  - source_type: "tencent_meeting"  # 腾讯会议回放
+    source_url: "https://meeting.tencent.com/cw/lJayL90E87"
+    wiki_url: ""
+    target_wiki_url: ""
+    title: ""                       # 可选，手动指定标题（留空则自动获取）
+
   # - source_type: "zhihu"           # 知乎训练营
-  #   source_url: "https://www.zhihu.com/xen/market/training/training-video/2013216469425603157/2013217221053268327"
+  #   source_url: "https://www.zhihu.com/xen/training/live/room/2015493561915811432/2015494093585785835"
   #   wiki_url: ""
   #   target_wiki_url: ""
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
@@ -21,10 +27,10 @@ tasks:
   #   target_wiki_url: ""
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
-  - source_type: "xiaoe"            # 小鹅通
-    source_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b63c0ae4b0694c34e8e36c"
-    wiki_url: ""
-    target_wiki_url: ""
+  # - source_type: "xiaoe"            # 小鹅通
+  #   source_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b6426be4b0694c5b99f508"
+  #   wiki_url: ""
+  #   target_wiki_url: ""
 
   # - source_type: "taobao"          # 淘宝直播
   #   source_url: "https://81025.tbkflow.cn/pcLive/980e81dbbe10025fb8d7da8e63ec472f07a1a?f=eccxpIGJ"

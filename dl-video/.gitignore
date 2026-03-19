@@ -5,6 +5,12 @@ log-err/
 # 凭证
 cfg/credentials.yaml
 
+# 临时文件
+tmp/
+.browser_data/
+api_response.json
+page_full.html
+
 # Python
 __pycache__/
 *.pyc

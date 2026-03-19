@@ -39,7 +39,18 @@ def safe_filename(title: str) -> str:
     return ILLEGAL_CHARS.sub("_", title).strip()
 
 
-def extract_meeting_id(url: str) -> str:
+def parse_date_from_video_url(video_url: str) -> str:
+    """从视频URL中提取日期前缀，如 TM-20260310183436 → '260310-'"""
+    if not video_url:
+        return ""
+    m = re.search(r'TM-(\d{4})(\d{2})(\d{2})', video_url)
+    if m:
+        y, mo, d = m.groups()
+        return f"{y[2:]}{mo}{d}-"
+    return ""
+
+
+def extract_sharing_id(url: str) -> str:
     """从 URL 提取 sharing_id（短代码）"""
     m = re.search(r'/c(?:w|rm)/([A-Za-z0-9]+)', url)
     if not m:
@@ -48,7 +59,7 @@ def extract_meeting_id(url: str) -> str:
 
 
 def fetch_meeting_page(sharing_id: str, cookie: str = "") -> tuple:
-    """使用浏览器自动化获取meeting_id、recording_id和媒体URL"""
+    """使用浏览器自动化获取 recording_id、视频URL、cookies、标题、日期"""
     url = f"https://meeting.tencent.com/cw/{sharing_id}"
 
     user_data_dir = PROJECT_DIR / ".browser_data"
@@ -147,13 +158,14 @@ def fetch_meeting_page(sharing_id: str, cookie: str = "") -> tuple:
                         log.info(f"从页面提取标题: {page_title}")
                 break
 
-        # 尝试定位页面元素
+        # 尝试从 DOM 元素获取标题
         try:
-            # 查找标题
             title_elem = page.locator('h1, h2, .title, [class*="title"]').first
             if title_elem:
-                title_text = title_elem.inner_text()
-                log.info(f"找到标题元素: {title_text}")
+                title_text = title_elem.inner_text().strip()
+                if title_text and title_text not in ['返回', '分享', '另存为']:
+                    page_title = title_text
+                    log.info(f"从DOM元素提取标题: {page_title}")
         except Exception as e:
             log.info(f"未找到标题元素: {e}")
 
@@ -162,17 +174,6 @@ def fetch_meeting_page(sharing_id: str, cookie: str = "") -> tuple:
         for req in api_requests[:10]:  # 只打印前10个
             log.info(f"  {req['method']} {req['url']}")
 
-        # 从拦截的API请求中提取 auth_share_id (UUID)
-        extracted_uuid = ""
-        for req in api_requests:
-            url = req.get('url', '')
-            uuid_match = re.search(r'auth_share_id=([0-9a-f-]{36})', url, re.IGNORECASE)
-            if uuid_match:
-                extracted_uuid = uuid_match.group(1)
-                log.info(f"从API请求中提取到 auth_share_id: {extracted_uuid}")
-                break
-        if not extracted_uuid:
-            log.warning("未从API请求中找到 auth_share_id")
 
         # 检查页面是否完整加载
         if len(page_html) < 300000:
@@ -187,23 +188,14 @@ def fetch_meeting_page(sharing_id: str, cookie: str = "") -> tuple:
         cookies_dict = {c['name']: c['value'] for c in browser.cookies()}
         log.info(f"已提取 {len(cookies_dict)} 个 cookie")
 
-        # 2. 提取meeting_id、recording_id（用于API获取逐字稿、纪要）
+        # 2. 提取 recording_id（用于API获取逐字稿、纪要）
         log.info("从页面提取关键ID...")
         long_ids = re.findall(r'\b(\d{19})\b', page_html)
-        meeting_ids = [i for i in long_ids if i.startswith('8')]
         recording_ids = [i for i in long_ids if i.startswith('2')]
 
-        meeting_id_num = meeting_ids[0] if meeting_ids else ""
         recording_id_num = max(recording_ids) if recording_ids else ""
 
-        log.info(f"提取到: meeting_id={meeting_id_num}, recording_id={recording_id_num}")
-
-        # 使用从API请求中提取的 auth_share_id
-        auth_share_id = extracted_uuid
-        if auth_share_id:
-            log.info(f"使用 auth_share_id: {auth_share_id}")
-        else:
-            log.warning("未获取到有效的 auth_share_id")
+        log.info(f"提取到: recording_id={recording_id_num}")
 
         # 3. 提取视频URL
         video_url = None
@@ -222,19 +214,14 @@ def fetch_meeting_page(sharing_id: str, cookie: str = "") -> tuple:
             log.warning(f"提取视频URL失败: {e}")
 
         browser.close()
-        return meeting_id_num, recording_id_num, video_url, cookies_dict, page_title, page_date_prefix, auth_share_id, page_text
+        return recording_id_num, video_url, cookies_dict, page_title, page_date_prefix, page_text
 
 
-def fetch_meeting_data_via_api(meeting_id: str, recording_id: str, share_id: str, cookies: dict) -> dict:
-    """通过API获取会议数据（标题、日期、时间轴、纪要）"""
+def fetch_meeting_data_via_api(recording_id: str, cookies: dict) -> dict:
+    """通过API获取会议数据（时间轴、纪要）"""
     import time
     import random
     import string
-
-    # share_id 应该是 auth_share_id (UUID格式)
-    if not share_id or len(share_id) < 20:
-        log.error(f"share_id 不是UUID格式: {share_id}，API调用将失败")
-        return {'title': '', 'date_prefix': '', 'summary': '', 'timeline': []}
 
     def make_params():
         nonce = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
@@ -253,7 +240,6 @@ def fetch_meeting_data_via_api(meeting_id: str, recording_id: str, share_id: str
             "c_app_uid": "",
             "c_account_corp_id": "563556228",
             "c_lang": "zh-CN",
-            "meeting_id": meeting_id,
         }
 
     # API headers
@@ -272,11 +258,9 @@ def fetch_meeting_data_via_api(meeting_id: str, recording_id: str, share_id: str
         url = "https://meeting.tencent.com/wemeet-tapi/v2/meetlog/public/record-detail/query-timeline"
         body = {
             "record_id": recording_id,
-            "meeting_id": meeting_id,
             "pwd_token": "",
             "activity_uid": "",
             "lang": "zh",
-            "share_id": share_id
         }
         resp = requests.post(url, params=make_params(), headers=api_headers, json=body, cookies=cookies, timeout=30)
         if resp.status_code == 200:
@@ -312,9 +296,7 @@ def fetch_meeting_data_via_api(meeting_id: str, recording_id: str, share_id: str
             "record_id": recording_id,
             "pwd_token": "",
             "activity_uid": "",
-            "meeting_id": meeting_id,
             "lang": "zh",
-            "share_id": share_id,
             "template_id": ""
         }
         resp = requests.post(url, params=make_params(), headers=api_headers, json=body, cookies=cookies, timeout=30)
@@ -380,11 +362,10 @@ def _parse_api_summary(info: dict) -> str:
     return '\n'.join(parts)
 
 
-def fetch_transcript_via_api(meeting_id: str, recording_id: str, cookies: dict) -> dict:
+def fetch_transcript_via_api(recording_id: str, cookies: dict) -> dict:
     """通过API获取逐字稿数据"""
     api_url = "https://meeting.tencent.com/wemeet-cloudrecording-webapi/v1/minutes/detail"
     params = {
-        "meeting_id": meeting_id,
         "recording_id": recording_id,
         "lang": "zh",
         "pid": "0",
@@ -656,38 +637,25 @@ def process_tencent_meeting(task: dict, config: dict, creds: dict):
     log.info(f"开始处理腾讯会议: {source_url}")
 
     try:
-        sharing_id = extract_meeting_id(source_url)
+        sharing_id = extract_sharing_id(source_url)
         log.info(f"Sharing ID: {sharing_id}")
 
         cookie = creds.get("tencent_meeting", {}).get("cookie", "")
-        meeting_id_num, recording_id_num, video_url, cookies, page_title, page_date_prefix, auth_share_id, page_text = fetch_meeting_page(sharing_id, cookie)
+        recording_id_num, video_url, cookies, page_title, page_date_prefix, page_text = fetch_meeting_page(sharing_id, cookie)
 
         log.info("浏览器已关闭，开始通过API获取会议数据...")
 
-        # 通过API获取会议数据（标题、日期、纪要、时间轴）
-        # 优先使用 auth_share_id (UUID)，如果获取失败则用 sharing_id (短代码)
-        record_share_id = auth_share_id or sharing_id
-        api_data = fetch_meeting_data_via_api(meeting_id_num, recording_id_num, record_share_id, cookies)
+        # 通过API获取会议数据（纪要、时间轴）
+        api_data = fetch_meeting_data_via_api(recording_id_num, cookies)
 
-        # 调试：打印所有变量
-        log.info(f"调试信息:")
-        log.info(f"  user_title = [{user_title}]")
-        log.info(f"  api_data['title'] = [{api_data.get('title', '')}]")
-        log.info(f"  page_title = [{page_title}]")
-        log.info(f"  page_date_prefix = [{page_date_prefix}]")
-        log.info(f"  api_data['date_prefix'] = [{api_data.get('date_prefix', '')}]")
-        log.info(f"  api_data['timeline'] = [{len(api_data.get('timeline', []))}]条")
-        log.info(f"  api_data['summary'] = [{len(api_data.get('summary', ''))}]字")
-
-        # 使用API返回的数据，如果API失败则使用页面解析的数据作为fallback
-        title = user_title or api_data.get('title', '') or page_title or meeting_id_num
-        date_prefix = api_data.get('date_prefix', '') or page_date_prefix
-
-        log.info(f"最终使用: title=[{title}], date_prefix=[{date_prefix}]")
+        # 调试：打印关键变量
+        log.info(f"  标题: user=[{user_title}], page=[{page_title}]")
+        log.info(f"  日期: video_url=[{parse_date_from_video_url(video_url)}], page=[{page_date_prefix}]")
+        log.info(f"  API: timeline={len(api_data.get('timeline', []))}条, summary={len(api_data.get('summary', ''))}字")
 
         # 通过API获取逐字稿
         transcript = []
-        transcript_data = fetch_transcript_via_api(meeting_id_num, recording_id_num, cookies)
+        transcript_data = fetch_transcript_via_api(recording_id_num, cookies)
         if transcript_data and 'minutes' in transcript_data:
             minutes = transcript_data['minutes']
             if 'paragraphs' in minutes:
@@ -709,22 +677,23 @@ def process_tencent_meeting(task: dict, config: dict, creds: dict):
                                         transcript.append((time_str, word['text']))
                 log.info(f"从API提取到 {len(transcript)} 条逐字稿")
 
-        # 使用API返回的数据（标题、日期、纪要、时间轴）
-        # 标题优先级：用户指定 > API返回 > 页面解析 > meeting_id
-        title = user_title or api_data.get('title', '') or page_title or meeting_id_num
-        date_prefix = api_data.get('date_prefix', '') or page_date_prefix
+        # 汇总最终数据
+        # 标题优先级：用户指定 > 页面解析 > sharing_id
+        title = user_title or page_title or sharing_id
+        # 日期优先级：视频URL提取 > 页面文本解析
+        date_prefix = parse_date_from_video_url(video_url) or page_date_prefix
         summary = api_data.get('summary', '')
         timeline = api_data.get('timeline', [])
 
         # 如果API返回的时间轴为空，尝试从页面文本解析
-        if not timeline and page_text:
-            log.info("API时间轴为空，从页面文本解析...")
-            timeline = parse_timeline_from_page_text(page_text)
+        # if not timeline and page_text:
+        #     log.info("API时间轴为空，从页面文本解析...")
+        #     timeline = parse_timeline_from_page_text(page_text)
 
         # 如果API返回的纪要为空，尝试从页面文本解析
-        if not summary and page_text:
-            log.info("API纪要为空，尝试从页面文本解析...")
-            summary = parse_summary_from_page_text(page_text)
+        # if not summary and page_text:
+        #     log.info("API纪要为空，尝试从页面文本解析...")
+        #     summary = parse_summary_from_page_text(page_text)
 
         safe_title = safe_filename(title)
         filename = f"{date_prefix}{safe_title}"
