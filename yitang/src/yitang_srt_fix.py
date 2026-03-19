@@ -262,7 +262,8 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             "temperature": temperature or self.temperature,
         }
-        for attempt in range(3):
+        max_retries = 6
+        for attempt in range(max_retries):
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=300)
                 resp.raise_for_status()
@@ -274,8 +275,8 @@ class LLMClient:
                 return data["choices"][0]["message"]["content"]
             except requests.exceptions.HTTPError:
                 if resp.status_code == 429:
-                    wait = 2 ** attempt * 5
-                    log.warning(f"速率限制，等待 {wait}s...")
+                    wait = min(2 ** attempt * 10, 120)  # 10s,20s,40s,80s,120s,120s
+                    log.warning(f"速率限制(attempt {attempt+1}/{max_retries})，等待 {wait}s...")
                     time.sleep(wait)
                     continue
                 log.error(f"LLM 调用失败: {resp.status_code}, {resp.text}")
@@ -283,8 +284,8 @@ class LLMClient:
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ProxyError,
                     requests.exceptions.ReadTimeout) as e:
-                wait = 2 ** attempt * 10
-                log.warning(f"连接异常(attempt {attempt+1}/3)，等待 {wait}s 后重试: {e}")
+                wait = min(2 ** attempt * 10, 120)
+                log.warning(f"连接异常(attempt {attempt+1}/{max_retries})，等待 {wait}s 后重试: {e}")
                 time.sleep(wait)
                 continue
             except Exception as e:
@@ -437,23 +438,32 @@ def run_llm_fix(entries, transcript_text, terms, custom_dict, config, creds,
         log.info(f"LLM 校订: 段 {chunk_num}/{total_chunks} "
                  f"(字幕 {chunk[0][0]}-{chunk[-1][0]})")
 
-        excerpt = find_transcript_excerpt(transcript_text, chunk)
-        user_prompt = build_user_prompt(chunk, excerpt, terms, custom_dict)
-        reply = client.chat(system_prompt, user_prompt)
-        fixes = parse_llm_json(reply)
-        # 过滤无效条目：original == fixed 或缺少必要字段
-        fixes = [f for f in fixes
-                 if f.get("fixed") and f.get("original")
-                 and f["fixed"].strip() != f["original"].strip()]
-        log.info(f"  段 {chunk_num} 返回 {len(fixes)} 条有效修正")
-        all_fixes.extend(fixes)
+        try:
+            excerpt = find_transcript_excerpt(transcript_text, chunk)
+            user_prompt = build_user_prompt(chunk, excerpt, terms, custom_dict)
+            reply = client.chat(system_prompt, user_prompt)
+            fixes = parse_llm_json(reply)
+            # 过滤无效条目：original == fixed 或缺少必要字段
+            fixes = [f for f in fixes
+                     if f.get("fixed") and f.get("original")
+                     and f["fixed"].strip() != f["original"].strip()]
+            log.info(f"  段 {chunk_num} 返回 {len(fixes)} 条有效修正")
+            all_fixes.extend(fixes)
 
-        # 实时写入缓存
-        if cache_path:
-            cache[chunk_key] = fixes
-            Path(cache_path).write_text(
-                json.dumps(cache, ensure_ascii=False, indent=2),
-                encoding="utf-8")
+            # 实时写入缓存
+            if cache_path:
+                cache[chunk_key] = fixes
+                Path(cache_path).write_text(
+                    json.dumps(cache, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+        except RuntimeError as e:
+            log.error(f"  段 {chunk_num} 失败（重试耗尽），跳过: {e}")
+            # 保存已有缓存，继续处理后续段
+            if cache_path:
+                Path(cache_path).write_text(
+                    json.dumps(cache, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+            continue
 
     return all_fixes, client
 
