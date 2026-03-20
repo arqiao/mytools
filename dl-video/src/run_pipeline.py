@@ -150,7 +150,7 @@ def notify_feishu(creds, msg: str):
         print(f"  [飞书通知异常] {e}")
 
 
-def run_step(step_id, step_name, script_path):
+def run_step(step_id, step_name, script_path, extra_args=None):
     """运行单个 step，返回 (success, error_msg)"""
     log_file = LOG_DIR / f"{step_id}_pipeline.log"
 
@@ -162,6 +162,8 @@ def run_step(step_id, step_name, script_path):
 
     # 使用 python 运行脚本，日志同时输出到文件和控制台
     cmd = [sys.executable, str(script_path)]
+    if extra_args:
+        cmd.extend(extra_args)
 
     try:
         # 设置环境让子进程输出 UTF-8
@@ -293,6 +295,24 @@ def main():
     step_indices = {"s1": 0, "s2": 1, "s3": 2, "s4": 3, "s5": 4}
     start_index = step_indices.get(start_step, 0)
 
+    # mp3_path 用于 s3 传参调用
+    mp3_path = None
+    # srt_path 用于 s4 传参调用
+    srt_path = None
+    # fix_srt_path 用于 s5 传参调用
+    fix_srt_path = None
+
+    # 手动传入 srt 模式：直接从参数确定 srt 路径
+    if input_file and input_type == "srt":
+        srt_path = Path(input_file).absolute()
+
+    # 手动传入 fix_srt 模式：直接传给 s5
+    if input_file and input_type == "fix_srt":
+        fix_srt_path = Path(input_file).absolute()
+
+    if input_file and input_type == "mp3":
+        mp3_path = Path(input_file).absolute()
+
     for i, (step_id, step_name, script_path) in enumerate(STEPS):
         # 跳过起始步骤之前的步骤
         if i < start_index:
@@ -307,7 +327,66 @@ def main():
             error_details.append(error)
             break
 
-        success, error_msg = run_step(step_id, step_name, script)
+        # s1 完成后扫描 output 目录获取 mp3 路径
+        if step_id == "s3" and mp3_path is None:
+            mp3_files = sorted(OUTPUT_DIR.glob("*.mp3"))
+            if mp3_files:
+                mp3_path = mp3_files[-1].absolute()
+                os.environ["DL_VIDEO_INPUT_FILE"] = str(mp3_path)
+                os.environ["DL_VIDEO_INPUT_TYPE"] = "mp3"
+                print(f"[INFO] 扫描到 MP3: {mp3_path.name}")
+
+        # 扫描到 mp3 后也推导 srt 路径
+        if step_id == "s3" and mp3_path and srt_path is None:
+            wm_srt = mp3_path.with_name(f"{mp3_path.stem}_wm.srt")
+            ori_srt = mp3_path.with_name(f"{mp3_path.stem}_ori.srt")
+            if ori_srt.exists():
+                srt_path = ori_srt.absolute()
+            elif wm_srt.exists():
+                srt_path = wm_srt.absolute()
+
+        # s3 完成后，推导 srt 路径供 s4 使用
+        if step_id == "s3" and mp3_path:
+            # 基于 mp3 路径推导 _wm.srt 或 _ori.srt
+            wm_srt = mp3_path.with_name(f"{mp3_path.stem}_wm.srt")
+            ori_srt = mp3_path.with_name(f"{mp3_path.stem}_ori.srt")
+            if ori_srt.exists():
+                srt_path = ori_srt.absolute()
+            elif wm_srt.exists():
+                srt_path = wm_srt.absolute()
+            else:
+                # 扫描 output 目录
+                candidates = sorted(OUTPUT_DIR.glob("*_wm.srt")) + sorted(OUTPUT_DIR.glob("*_ori.srt"))
+                if candidates:
+                    srt_path = candidates[-1].absolute()
+            if srt_path:
+                print(f"[INFO] S4 输入字幕: {srt_path.name}")
+
+        # s3 使用命令行参数传入音频文件
+        extra_args = None
+        if step_id == "s3" and mp3_path:
+            extra_args = [str(mp3_path), "--whisper"]
+
+        # s4 使用命令行参数传入字幕文件
+        if step_id == "s4" and srt_path:
+            extra_args = ["--subtitle", str(srt_path)]
+
+        # s4 完成后，推导 fix_srt 路径供 s5 使用
+        if step_id == "s4" and srt_path:
+            fix_srt = srt_path.parent / f"{srt_path.stem}_fix.srt"
+            if fix_srt.exists():
+                fix_srt_path = fix_srt.absolute()
+                print(f"[INFO] S5 输入字幕: {fix_srt_path.name}")
+            else:
+                # 没有 _fix 版本，用原始 srt
+                fix_srt_path = srt_path
+                print(f"[INFO] S5 输入字幕(无fix): {srt_path.name}")
+
+        # s5 使用命令行参数传入字幕文件
+        if step_id == "s5" and fix_srt_path:
+            extra_args = ["--subtitle", str(fix_srt_path)]
+
+        success, error_msg = run_step(step_id, step_name, script, extra_args)
 
         if not success:
             failed_steps.append((step_id, error_msg))

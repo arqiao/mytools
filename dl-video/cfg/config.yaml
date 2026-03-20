@@ -1,48 +1,77 @@
 output_dir: "output"
-yitang_dir: "../yitang"
 
-# 回放任务列表 — 支持多种视频源
-tasks:
-  # - source_type: "feishu_minutes"    # 飞书妙记
-  #   source_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
-  #   wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
-  #   target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
-  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+# 各步骤输入配置
+input:
+  s3:
+    source_type: ""    # 视频源类型
+    source_url: ""      # 视频源 URL
+  s4:
+    subtitle: ""
+    transcript: ""
+  s5:
+    transcript: ""
+    subtitle: ""
+    discussion: ""
 
-  - source_type: "tencent_meeting"  # 腾讯会议回放
-    source_url: "https://meeting.tencent.com/cw/lJayL90E87"
-    wiki_url: ""
-    target_wiki_url: ""
-    title: ""                       # 可选，手动指定标题（留空则自动获取）
+# 各步骤输出配置
+output:
+  s3:
+    dir: "output"
+  s4:
+    dir: "output"
+    suffix: "_fix"
+  s5:
+    dir: "output"
+    prefix: ""
 
-  # - source_type: "zhihu"           # 知乎训练营
-  #   source_url: "https://www.zhihu.com/xen/training/live/room/2015493561915811432/2015494093585785835"
-  #   wiki_url: ""
-  #   target_wiki_url: ""
-  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+# 字幕引擎后缀映射（引擎名 → 文件名后缀）
+s3_engine_suffix:
+  xunfei: "_xunfei"
+  aliyun: "_aliyun"
+  doubao: "_doubao"
+  feishu: "_feishu"
+  tencent: "_tencent"
+  whisper_large: "_wl"
+  whisper_medium: "_wm"
+  whisper_small: "_ws"
+  whisper_tiny: "_wt"
 
-  # - source_type: "panda"           # 熊猫学院
-  #   source_url: "https://fclive.pandacollege.cn/p/9nubG3"
-  #   wiki_url: "https://forchangesz.feishu.cn/wiki/AbsEw9BrEiROVzkelv8cTelInfd"
-  #   target_wiki_url: ""
-  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+s4_fix:
+  prompt: "prompt-srtfix-ref.md"
+  prompt_noref: "prompt-srtfix-noref.md"
+  chunk_size: 80
+  custom_dict: "srtfix-dict.yaml"
 
-  # - source_type: "xiaoe"            # 小鹅通
-  #   source_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b6426be4b0694c5b99f508"
-  #   wiki_url: ""
-  #   target_wiki_url: ""
+s5_analysis:
+  chunk_size: 30000
+  prompt_subtitle: "prompt-subtitle.md"
+  prompt_discussion: "prompt-discussion.md"
+  prompt_digest: "prompt-digest.md"
 
-  # - source_type: "taobao"          # 淘宝直播
-  #   source_url: "https://81025.tbkflow.cn/pcLive/980e81dbbe10025fb8d7da8e63ec472f07a1a?f=eccxpIGJ"
-  #   wiki_url: ""
-  #   target_wiki_url: ""
-  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
-llm:
-  provider: "minimax"
+# LLM 模型配置池（所有可用模型定义）
+llm_plan:
+  # 各步骤当前使用的模型
+  current_s4:
+    name: "minimax"
+    temperature: 0.2
+  current_s5:
+    name: "minimax"
+    temperature: 0.3
+  # LLM 模型调用接口
   minimax:
     model: "MiniMax-Text-01"
     base_url: "https://api.minimax.chat/v1"
     max_tokens: 8192
-    temperature: 0.3
-
+  volcengine:
+    model: "doubao-1.5-pro-256k"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    max_tokens: 8192
+  dashscope:
+    model: "qwen-max"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    max_tokens: 8192
+  deepseek:
+    model: "deepseek-chat"
+    base_url: "https://api.deepseek.com/v1"
+    max_tokens: 8192
