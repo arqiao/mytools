@@ -1,28 +1,39 @@
-output_dir: "output"
-
 # 各步骤输入配置
 input:
-  s3:
-    source_type: ""    # 视频源类型
-    source_url: ""      # 视频源 URL
+  # s1 的输入在 input.yaml 的 tasks 中配置
   s4:
+    # 字幕文件路径（支持相对/绝对路径，需含 .srt 后缀）
+    # 示例：output/260310-创新11班_wm.srt
     subtitle: ""
+    # 逐字稿（支持文件路径或飞书 URL，可选）
+    # 示例：output/260310-创新11班.md 或 https://arqiaoknow.feishu.cn/wiki/xxx
     transcript: ""
   s5:
+    # 逐字稿（支持文件路径或飞书 URL，可选）
+    # 示例：output/260310-创新11班.md 或 https://arqiaoknow.feishu.cn/wiki/xxx
     transcript: ""
+    # 字幕文件路径（支持相对/绝对路径，需含 .srt 后缀）
+    # 示例：output/260310-创新11班_fix.srt
     subtitle: ""
+    # 讨论区文件路径（支持 .xlsx 文件，可选）
+    # 示例：output/260310-创新11班_讨论.xlsx
     discussion: ""
 
 # 各步骤输出配置
 output:
-  s3:
-    dir: "output"
   s4:
-    dir: "output"
+    # 修正后字幕文件后缀（输入 xxx_wm.srt → 输出 xxx_wm_fix.srt）
     suffix: "_fix"
+    # S4 输出示例：
+    #   字幕：260310-创新11班_wm_fix.srt
+    #   变更日志：260310-创新11班_wm_fix_changelog.md
   s5:
-    dir: "output"
-    prefix: ""
+    # 输出文件名自定义前缀（留空则自动从输入文件名提取）
+    fnprefix: ""
+    # S5 输出示例：
+    #   信息拓展：260310-创新11班_信息拓展.md
+    #   精华摘要：260310-创新11班_精华摘要.md
+
 
 # 字幕引擎后缀映射（引擎名 → 文件名后缀）
 s3_engine_suffix:
@@ -37,16 +48,16 @@ s3_engine_suffix:
   whisper_tiny: "_wt"
 
 s4_fix:
-  prompt: "prompt-srtfix-ref.md"
-  prompt_noref: "prompt-srtfix-noref.md"
   chunk_size: 80
+  prompt: "srtfix-ref.md"
+  prompt_noref: "srtfix-noref.md"
   custom_dict: "srtfix-dict.yaml"
 
 s5_analysis:
   chunk_size: 30000
-  prompt_subtitle: "prompt-subtitle.md"
-  prompt_discussion: "prompt-discussion.md"
-  prompt_digest: "prompt-digest.md"
+  prompt_subtitle: "addon-subtitle.md"
+  prompt_discussion: "addon-discussion.md"
+  prompt_digest: "addon-digest.md"
 
 
 # LLM 模型配置池（所有可用模型定义）

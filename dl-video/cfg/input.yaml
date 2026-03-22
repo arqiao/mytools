@@ -1,36 +1,110 @@
+titlePPL: "" # pipeline程序专用，用来生成完整的输入及输出文件名的头半部分。
+
+# 输出目录（所有步骤共用）
+path_output_dir: "output/"
+path_log_dir: "log-err/"
+path_yitang_dir: "out-yitang/"
+titleShougong: "" #手工指定输入标题
+
+
+# 一堂AILive类课程的特殊处理
+s1_yitang_ailive:
+    output_prefix: "AI落地Live_"    # 视频文件命名约定
+    query_copystr: "AI落地Live"     # 如果属于这类课程，则执行文稿全文复制。
+# 一堂专题课wiki的复制范围
+s1_yitang_wikicopy:
+  start_heading: "开始上课"
+  end_heading: "作业与Candy"
+
+
 # 回放任务列表 — 支持多种视频源
 tasks:
+  # 一堂（视频+文稿）
+  - source_type: "yitang"           # 一堂（视频+文稿）
+    # working……直播2026春季马拉松。
+    source_huifang_url: "https://air.yitang.top/live/XNBW6NYTSm"
+    source_wiki_url: "https://yitang.top/fs-doc/ff4404a7811fe5d497e66f1c4ef0e79d/JvpHdyqtEo2lscx17UTcSZJkn3f"
+    target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/SEdNwtd2UidDhtkMGzFcKAnWnKh"
+  - source_type: "yitang"           # 一堂（视频+文稿）
+    # working……直播2026春季马拉松。
+    source_huifang_url: ""
+    source_wiki_url: "https://yitang.top/fs-doc/2fee14f2bab033a02aa59d8605513504/VH0zdsu1MoS5OQxFUDOcRW20nge"
+    target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/K31NwhbX2iyY9HkhGkacSSAin3c"
+  # - source_type: "yitang"           # 一堂（视频+文稿）
+  #   # BUG……CASE……专题——调研课1
+  #   source_huifang_url: "https://air.yitang.top/live/QogYGcdsVO?lessonId=b1I66377680b3b4e&noTrial=1&_uds=pd_lesson_detail_air&ticket=oe9x1xEC0Z1qmM3H&u=355973"
+  #   source_wiki_url: "https://yitang.top/fs-doc/b1I66377680b3b4e/GiJLdIkGEoSIpdxmFiWcmPOfnyg?fromAcl=lesson-founder"
+  #   target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/YsTMwYSnRioHqdkU5TIcv5wkn0b"
+  # - source_type: "yitang"           # 一堂（视频+文稿）
+  #   # TOTEST……CASE……分享版——读书会
+  #   source_huifang_url: ""
+  #   source_wiki_url: ""
+  #   target_wiki_url: ""
+
+  # - source_type: "yitang"           # 一堂（视频+文稿）
+  #   # OK……CASE……分享版——马拉松指南。
+  #     ### 文稿不长，是个好例子。
+  #     ### 表格内的并排图、表格内的引用；表格内的有序号。
+  #     ### 几类输入URL的写入逻辑都是一样的。
+  #   source_huifang_url: ""
+  #   source_wiki_url: "https://yitanger.feishu.cn/wiki/ZfJnwnsQRih5ock1l3NcT1Pknqc"
+  #   target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/YsTMwYSnRioHqdkU5TIcv5wkn0b"    # TEMP 可清空内容
+
+     ### 回放 URL。
+  #   ### 回放——周五直播课、年度马拉松
+  #   source_huifang_url: "https://air.yitang.top/live/49l_a4ZSEb"
+      ### 回放——专题课
+  #   source_huifang_url: "https://air.yitang.top/live/QogYGcdsVO?lessonId=b1I66377680b3b4e&noTrial=1&_uds=pd_lesson_detail_air&ticket=oe9x1xEC0Z1qmM3H&u=355973"
+  #   ### 回放——周二读书会（只读类型）
+  #   source_huifang_url: ""
+     ### 文稿 URL。
+  #   ### 文稿——周五直播课、年度马拉松
+  #   source_wiki_url: "https://yitang.top/fs-doc/c625f36d3f91712f021d5bfbc47e7ae1/SCaodfwWnomwojxHxKocInkun1x"
+  #   ### 文稿——专题课
+  #   source_wiki_url: "https://yitang.top/fs-doc/b1I66377680b3b4e/GiJLdIkGEoSIpdxmFiWcmPOfnyg?fromAcl=lesson-founder"
+  #   ### 文稿——周二读书会（只读类型）
+  #   source_wiki_url: "https://yitanger.feishu.cn/docx/FNa3dV2Vnorud5xH55RcTj1sn8e"
+  #   ### OK……文稿——官方受控分享文档（只读类型）
+  #   source_wiki_url: "https://yitanger.feishu.cn/wiki/ZfJnwnsQRih5ock1l3NcT1Pknqc"
+     ### 写入相关。第一个是 TEMP 测试文稿。
+  #   target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/YsTMwYSnRioHqdkU5TIcv5wkn0b"      # 写入目标飞书 wiki（留空则不写入）。
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+  #   output_name: ""                  # 可选，手动指定输出文件名（不含扩展名，留空则自动生成）
+
+
   # - source_type: "feishu_minutes"    # 飞书妙记
-  #   source_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
-  #   wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
+  #   source_huifang_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
+  #   source_wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
   #   target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   # - source_type: "tencent_meeting"  # 腾讯会议回放
-  #   source_url: "https://meeting.tencent.com/cw/lJayL90E87"
-  #   wiki_url: ""
+  #   source_huifang_url: "https://meeting.tencent.com/cw/lJayL90E87"
+  #   source_wiki_url: ""
   #   target_wiki_url: ""
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   # - source_type: "zhihu"           # 知乎训练营
-  #   source_url: "https://www.zhihu.com/xen/training/live/room/2015493561915811432/2015494093585785835"
-  #   wiki_url: ""
+  #   source_huifang_url: "https://www.zhihu.com/xen/training/live/room/2015493561915811432/2015494093585785835"
+  #   source_wiki_url: ""
   #   target_wiki_url: ""
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
-  - source_type: "panda"           # 熊猫学院
-    source_url: "https://fclive.pandacollege.cn/p/9nubG3"
-    wiki_url: "https://forchangesz.feishu.cn/wiki/AbsEw9BrEiROVzkelv8cTelInfd"
-    target_wiki_url: ""
-    title: ""                       # 可选，手动指定标题（留空则自动获取）
+  # - source_type: "panda"           # 熊猫学院
+  #   source_huifang_url: "https://fclive.pandacollege.cn/p/9nubG3"
+  #   source_wiki_url: "https://forchangesz.feishu.cn/wiki/AbsEw9BrEiROVzkelv8cTelInfd"
+  #   target_wiki_url: ""
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
 
   # - source_type: "xiaoe"            # 小鹅通
-  #   source_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b6426be4b0694c5b99f508"
-  #   wiki_url: ""
-  #   target_wiki_url: ""
-
-  # - source_type: "taobao"          # 淘宝直播
-  #   source_url: "https://81025.tbkflow.cn/pcLive/980e81dbbe10025fb8d7da8e63ec472f07a1a?f=eccxpIGJ"
-  #   wiki_url: ""
+  #   source_huifang_url: "https://appzvsjcfov9775.h5.xet.citv.cn/v4/course/alive/l_69b6426be4b0694c5b99f508"
+  #   source_wiki_url: ""
   #   target_wiki_url: ""
   #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+
+  # - source_type: "taobao"          # 淘宝直播
+  #   source_huifang_url: "https://81025.tbkflow.cn/pcLive/980e81dbbe10025fb8d7da8e63ec472f07a1a?f=eccxpIGJ"
+  #   source_wiki_url: ""
+  #   target_wiki_url: ""
+  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+
