@@ -10,17 +10,20 @@ API 流程:
 
 import logging
 import re
-import subprocess
 from pathlib import Path
 
 import requests
 import yaml
 
+from modules.ffmpeg_utils import extract_audio, download_hls
+from modules.config_utils import load_config, safe_filename
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -33,35 +36,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
-
-
-def _find_ffmpeg():
-    import shutil
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-    for candidate in [r"D:\tools\ffmpeg\bin\ffmpeg.exe",
-                      r"C:\tools\ffmpeg\bin\ffmpeg.exe"]:
-        if Path(candidate).exists():
-            return candidate
-    return "ffmpeg"
-
-
-FFMPEG = _find_ffmpeg()
-
-
-def safe_filename(title: str) -> str:
-    return ILLEGAL_CHARS.sub("_", title).strip()
-
-
-def load_config():
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
 
 
 def parse_taobao_url(source_url: str) -> tuple[str, str]:
@@ -160,67 +134,9 @@ def get_replay_url(session, api_base, live_id):
     return m3u8, thumb
 
 
-def download_video(m3u8_url, output_path):
-    """ffmpeg 下载 HLS 视频（无 DRM，直接下载）"""
-    if output_path.exists() and output_path.stat().st_size > 1024:
-        log.info(f"视频已存在，跳过: {output_path}")
-        return True
-    log.info(f"下载视频: {output_path.name}")
-    cmd = [
-        FFMPEG, "-i", m3u8_url,
-        "-c", "copy", "-bsf:a", "aac_adtstoasc",
-        str(output_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace",
-                                timeout=1800)
-    except FileNotFoundError:
-        log.error("ffmpeg 未安装或不在 PATH 中")
-        return False
-    except subprocess.TimeoutExpired:
-        log.error("ffmpeg 下载超时（30分钟）")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg 下载失败: {result.stderr[-500:]}")
-        return False
-    size_mb = output_path.stat().st_size / 1024 / 1024
-    log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
-    return True
-
-
-def extract_audio(video_path, audio_path):
-    """ffmpeg 从视频提取音频为 MP3"""
-    if audio_path.exists():
-        log.info(f"音频已存在，跳过: {audio_path}")
-        return True
-    if not video_path.exists():
-        log.warning(f"视频不存在，无法提取音频: {video_path}")
-        return False
-    log.info(f"提取音频: {audio_path.name}")
-    cmd = [
-        FFMPEG, "-err_detect", "ignore_err",
-        "-i", str(video_path),
-        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-        str(audio_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        log.warning("ffmpeg 未安装或不在 PATH 中")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg 提取音频失败: {result.stderr[-500:]}")
-        return False
-    size_mb = audio_path.stat().st_size / 1024 / 1024
-    log.info(f"音频提取完成: {audio_path} ({size_mb:.1f} MB)")
-    return True
-
-
 def process_taobao(task, config, creds):
     """处理淘宝直播回放任务（入口）"""
-    source_url = task["source_url"]
+    source_url = task["source_huifang_url"]
     company_id_from_url, link_code = parse_taobao_url(source_url)
     log.info(f"处理淘宝直播: companyId={company_id_from_url}, linkCode={link_code}")
 
@@ -241,7 +157,7 @@ def process_taobao(task, config, creds):
 
     # 2. 获取课程信息（标题等）
     course = get_course_info(session, api_base, company_id, union_id, course_id)
-    title = task.get("title") or course["title"] or f"taobao_{link_code}"
+    title = config.get("titleShougong", "") or task.get("title") or course["title"] or f"taobao_{link_code}"
     base_name = safe_filename(title)
     live_id = live_id or course["live_id"]
     log.info(f"标题: {title}, 文件名: {base_name}, liveId: {live_id}")
@@ -249,7 +165,7 @@ def process_taobao(task, config, creds):
 
     # 4. 下载视频（mp4 格式，ts 格式音频流有兼容性问题）
     video_path = OUTPUT_DIR / f"{base_name}.mp4"
-    if not download_video(m3u8_url, video_path):
+    if not download_hls(m3u8_url, video_path):
         log.error("视频下载失败")
         return
 

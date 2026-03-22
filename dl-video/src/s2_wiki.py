@@ -2,16 +2,18 @@
 
 import logging
 import re
-import sys
 from pathlib import Path
 
 import yaml
 
+from modules.config_utils import load_config, safe_filename
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -24,40 +26,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
-
-
-def load_config():
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
-
-
-def safe_filename(title: str) -> str:
-    return ILLEGAL_CHARS.sub("_", title).strip()
-
-
-def setup_yitang_path(config):
-    """将 yitang/src 加入 sys.path，并同步 credentials"""
-    yitang_dir = Path(PROJECT_DIR / config.get("yitang_dir", "../yitang"))
-    yitang_src = yitang_dir / "src"
-    if str(yitang_src) not in sys.path:
-        sys.path.insert(0, str(yitang_src))
-    sync_credentials_to_yitang(config)
-    return yitang_dir
-
-
-def sync_credentials_to_yitang(config):
-    """同步 credentials 到 yitang，避免 refresh_token 不一致"""
-    import shutil
-    yitang_dir = Path(PROJECT_DIR / config.get("yitang_dir", "../yitang"))
-    src_cred = CFG_DIR / "credentials.yaml"
-    dst_cred = yitang_dir / "cfg" / "credentials.yaml"
-    if src_cred.exists() and dst_cred.exists():
-        shutil.copy2(str(src_cred), str(dst_cred))
 
 
 def download_wiki(wiki_url, output_dir, base_name):
@@ -85,12 +53,15 @@ def write_to_wiki(target_wiki_url, content, creds):
         log.info("未配置 target_wiki_url，跳过写入")
         return False
 
-    from yitang_wiki import YitangCopier
-    copier = YitangCopier()
+    import requests
+    import time
+    from modules.feishu_token import resolve_wiki_token, ensure_feishu_token
+
+    session = requests.Session()
 
     # 解析目标文档 ID
     if "/wiki/" in target_wiki_url:
-        doc_id = copier.resolve_wiki_token(target_wiki_url)
+        doc_id = resolve_wiki_token(target_wiki_url, creds, session)
     else:
         doc_id = target_wiki_url.rstrip("/").split("/")[-1].split("?")[0]
 
@@ -98,11 +69,6 @@ def write_to_wiki(target_wiki_url, content, creds):
 
     # 将 markdown 内容转为飞书 blocks 并写入
     # 使用 docx API 追加内容
-    import requests
-    import time
-    from s1_huifang import ensure_feishu_token
-
-    session = requests.Session()
     user_token = ensure_feishu_token(creds, session)
     headers = {
         "Authorization": f"Bearer {user_token}",
@@ -164,18 +130,18 @@ def write_to_wiki(target_wiki_url, content, creds):
 
 
 def get_task_title(task, config, creds):
-    """获取任务标题（优先手动指定，否则从妙记获取）"""
-    manual_title = task.get("title", "")
+    """获取任务标题（优先 titleShougong > task.title > 自动获取）"""
+    manual_title = config.get("titleShougong", "") or task.get("title", "")
     if manual_title:
         return manual_title
 
     source_type = task.get("source_type", "")
     if source_type == "feishu_minutes":
-        from s1_huifang import extract_minutes_token, get_minutes_info
-        from s1_huifang import ensure_feishu_token
+        from modules.feishu_minutes import extract_minutes_token, get_minutes_info
+        from modules.feishu_token import ensure_feishu_token
         import requests
         session = requests.Session()
-        token = extract_minutes_token(task["source_url"])
+        token = extract_minutes_token(task["source_huifang_url"])
         user_token = ensure_feishu_token(creds, session)
         title, _ = get_minutes_info(token, user_token, session)
         return title
@@ -185,26 +151,29 @@ def get_task_title(task, config, creds):
 
 def main():
     config, creds = load_config()
-    setup_yitang_path(config)
 
     tasks = config.get("tasks", [])
     if not tasks:
         log.warning("config.yaml 中无任务")
         return
 
-    output_dir = PROJECT_DIR / config.get("output_dir", "output")
+    output_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
     output_dir.mkdir(exist_ok=True)
 
     for i, task in enumerate(tasks):
+        source_type = task.get("source_type", "")
         log.info(f"=== 任务 {i+1}/{len(tasks)} ===")
+
+        if source_type == "yitang":
+            from s2w_yitang_wiki import process_yitang_wiki
+            process_yitang_wiki(task, config, creds)
+            continue
+
         title = get_task_title(task, config, creds)
         base_name = safe_filename(title)
 
-        # get_task_title 可能刷新了 token，再同步一次到 yitang
-        sync_credentials_to_yitang(config)
-
         # 下载教学文档
-        wiki_url = task.get("wiki_url", "")
+        wiki_url = task.get("source_wiki_url", "")
         download_wiki(wiki_url, output_dir, base_name)
 
         # 写入飞书 wiki（如果配置了 target_wiki_url）

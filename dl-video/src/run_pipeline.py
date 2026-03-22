@@ -2,7 +2,7 @@
 """
 五步流水线脚本
 依次执行：s1 → s2 → s3 → s4 → s5
-每个 step 输出日志到 log-err 目录，错误时通知到飞书 debug 群
+每个 step 输出日志到配置目录，错误时通知到飞书 debug 群
 
 用法：
   python run_pipeline.py                    # 从 S1 开始执行完整流水线
@@ -11,7 +11,6 @@
 
 import io
 import json
-import os
 import subprocess
 import sys
 import time
@@ -29,8 +28,9 @@ if sys.platform == "win32":
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 
 # 飞书群通知配置
@@ -48,63 +48,6 @@ STEPS = [
 def load_credentials():
     creds_path = CFG_DIR / "credentials.yaml"
     return yaml.safe_load(creds_path.read_text(encoding="utf-8"))
-
-
-def refresh_token(creds):
-    """使用 refresh_token 刷新 access_token"""
-    fs = creds.get("feishu", {})
-    refresh_token = fs.get("user_refresh_token", "")
-    if not refresh_token:
-        return None
-
-    try:
-        resp = requests.post(
-            "https://open.feishu.cn/open-apis/authen/v1/oidc/refresh_access_token",
-            json={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            print(f"  [Token刷新失败] {data.get('msg')}")
-            return None
-
-        td = data["data"]
-        creds["feishu"]["user_access_token"] = td["access_token"]
-        creds["feishu"]["user_refresh_token"] = td["refresh_token"]
-        creds["feishu"]["user_token_expire_time"] = int(time.time()) + td["expires_in"]
-
-        # 写回 credentials.yaml
-        creds_path = CFG_DIR / "credentials.yaml"
-        with open(creds_path, "w", encoding="utf-8") as f:
-            yaml.dump(creds, f, allow_unicode=True, default_flow_style=False)
-
-        print("  [Token 刷新成功]")
-        return creds
-    except Exception as e:
-        print(f"  [Token刷新异常] {e}")
-        return None
-
-
-def ensure_token(creds):
-    """确保 token 有效，必要时刷新"""
-    expire = creds.get("feishu", {}).get("user_token_expire_time", 0)
-    if time.time() > expire - 60:
-        print("[INFO] 飞书 token 过期，尝试刷新...")
-        new_creds = refresh_token(creds)
-        if new_creds:
-            return new_creds
-    return creds
-
-
-def get_feishu_token(creds):
-    token = creds.get("feishu", {}).get("user_access_token", "")
-    expire = creds.get("feishu", {}).get("user_token_expire_time", 0)
-    if time.time() > expire - 60:
-        print("[警告] 飞书 token 已过期")
-    return token
 
 
 def notify_feishu(creds, msg: str):
@@ -250,38 +193,45 @@ def main():
 
     creds = load_credentials()
 
-    # 设置环境变量供后续步骤使用
+    # 读取 input.yaml 获取任务信息
+    input_cfg_path = CFG_DIR / "input.yaml"
+    config = yaml.safe_load(input_cfg_path.read_text(encoding="utf-8")) or {}
+
+    # 设置输入文件信息
     if input_file and input_type:
         input_path = Path(input_file)
-        # 从文件名提取标题（去掉后缀作为默认标题）
-        default_title = input_path.stem
-        # 去掉可能的 _ori、_wm、_fix 后缀
-        for suffix in ["_ori", "_wm", "_fix"]:
-            if default_title.endswith(suffix):
-                default_title = default_title[:-len(suffix)]
-                break
+        # 标题优先级：titleShougong > 从文件名提取
+        default_title = config.get("titleShougong", "")
+        if not default_title:
+            default_title = input_path.stem
+            # 去掉可能的 _ori、_wm、_fix 后缀
+            for suffix in ["_ori", "_wm", "_fix"]:
+                if default_title.endswith(suffix):
+                    default_title = default_title[:-len(suffix)]
+                    break
 
-        os.environ["DL_VIDEO_INPUT_FILE"] = str(input_path.absolute())
-        os.environ["DL_VIDEO_INPUT_TYPE"] = input_type
-        os.environ["DL_VIDEO_DEFAULT_TITLE"] = default_title
         print(f"[INFO] 输入标题: {default_title}")
     else:
         # 确保 token 有效（仅在全流程模式需要）
-        creds = ensure_token(creds)
+        from modules.feishu_token import ensure_feishu_token
+        ensure_feishu_token(creds, requests.Session())
 
-    feishu_token = get_feishu_token(creds)
-
-    # 读取 config.yaml 获取任务信息
-    config_path = CFG_DIR / "config.yaml"
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     tasks = config.get("tasks", [])
     task_count = len(tasks)
+
+    # 检测是否为 yitang 任务，切换输出目录
+    output_dir = OUTPUT_DIR
+    is_yitang = any(t.get("source_type") == "yitang" for t in tasks)
+    if is_yitang:
+        output_dir = PROJECT_DIR / config.get("path_yitang_dir", "out-yitang").rstrip("/")
+        output_dir.mkdir(exist_ok=True)
+        print(f"[INFO] 检测到 yitang 任务，输出目录: {output_dir}")
 
     # 发送开始通知
     if task_count > 0:
         task_info = f"任务: {task_count} 个\n"
         if tasks:
-            task_info += f"首个: {tasks[0].get('source_url', 'N/A')[:60]}"
+            task_info += f"首个: {tasks[0].get('source_huifang_url', 'N/A')[:60]}"
         notify_feishu(creds, f"[dl-video] 流水线开始\n{task_info}")
 
     failed_steps = []
@@ -289,7 +239,6 @@ def main():
 
     # 每次执行 step 后可能刷新了 token，需要重新加载
     creds = load_credentials()
-    feishu_token = get_feishu_token(creds)
 
     # 确定起始步骤的索引
     step_indices = {"s1": 0, "s2": 1, "s3": 2, "s4": 3, "s5": 4}
@@ -329,11 +278,9 @@ def main():
 
         # s1 完成后扫描 output 目录获取 mp3 路径
         if step_id == "s3" and mp3_path is None:
-            mp3_files = sorted(OUTPUT_DIR.glob("*.mp3"))
+            mp3_files = sorted(output_dir.glob("*.mp3"))
             if mp3_files:
                 mp3_path = mp3_files[-1].absolute()
-                os.environ["DL_VIDEO_INPUT_FILE"] = str(mp3_path)
-                os.environ["DL_VIDEO_INPUT_TYPE"] = "mp3"
                 print(f"[INFO] 扫描到 MP3: {mp3_path.name}")
 
         # 扫描到 mp3 后也推导 srt 路径
@@ -356,7 +303,7 @@ def main():
                 srt_path = wm_srt.absolute()
             else:
                 # 扫描 output 目录
-                candidates = sorted(OUTPUT_DIR.glob("*_wm.srt")) + sorted(OUTPUT_DIR.glob("*_ori.srt"))
+                candidates = sorted(output_dir.glob("*_wm.srt")) + sorted(output_dir.glob("*_ori.srt"))
                 if candidates:
                     srt_path = candidates[-1].absolute()
             if srt_path:
@@ -404,7 +351,6 @@ def main():
 
         # step 成功后重新加载 token（可能被刷新了）
         creds = load_credentials()
-        feishu_token = get_feishu_token(creds)
 
     # 汇总结果
     print(f"\n{'='*60}")
@@ -415,11 +361,11 @@ def main():
         print("✓ 全部步骤执行成功")
 
         # 列出输出文件
-        if OUTPUT_DIR.exists():
-            md_files = list(OUTPUT_DIR.glob("*.md"))
-            ts_files = list(OUTPUT_DIR.glob("*.ts"))
-            mp3_files = list(OUTPUT_DIR.glob("*.mp3"))
-            srt_files = list(OUTPUT_DIR.glob("*.srt"))
+        if output_dir.exists():
+            md_files = list(output_dir.glob("*.md"))
+            ts_files = list(output_dir.glob("*.ts"))
+            mp3_files = list(output_dir.glob("*.mp3"))
+            srt_files = list(output_dir.glob("*.srt"))
 
             print(f"\n输出文件:")
             if ts_files:

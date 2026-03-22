@@ -20,11 +20,15 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import requests
 import yaml
 
+from modules.ffmpeg_utils import FFMPEG, extract_audio, download_hls, remux_ts_to_mp4
+from modules.config_utils import load_config, safe_filename
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -37,35 +41,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
-
-
-def _find_ffmpeg():
-    import shutil
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-    for candidate in [r"D:\tools\ffmpeg\bin\ffmpeg.exe",
-                      r"C:\tools\ffmpeg\bin\ffmpeg.exe"]:
-        if Path(candidate).exists():
-            return candidate
-    return "ffmpeg"
-
-
-FFMPEG = _find_ffmpeg()
-
-
-def safe_filename(title: str) -> str:
-    return ILLEGAL_CHARS.sub("_", title).strip()
-
-
-def load_config():
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
 
 
 def extract_m3u8_url(source_url: str) -> str:
@@ -301,56 +276,6 @@ def download_and_decrypt_segments(ts_urls: list[str], aes_key: bytes,
     return True
 
 
-def ffmpeg_download_hls(m3u8_url: str, referer: str, output_path: Path) -> bool:
-    """ffmpeg 直接下载无加密 HLS 流"""
-    if output_path.exists() and output_path.stat().st_size > 1024:
-        log.info(f"视频已存在，跳过: {output_path}")
-        return True
-    log.info(f"ffmpeg 下载 HLS（无加密）: {output_path.name}")
-    cmd = [
-        FFMPEG,
-        "-headers", f"Referer: {referer}\r\nOrigin: {referer.rstrip('/')}\r\n",
-        "-i", m3u8_url,
-        "-c", "copy", "-bsf:a", "aac_adtstoasc",
-        str(output_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace",
-                                timeout=1800)
-    except FileNotFoundError:
-        log.error("ffmpeg 未安装")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg HLS 下载失败: {result.stderr[-500:]}")
-        return False
-    size_mb = output_path.stat().st_size / 1024 / 1024
-    log.info(f"HLS 下载完成: {output_path} ({size_mb:.1f} MB)")
-    return True
-
-
-def remux_ts_to_mp4(ts_path: Path, mp4_path: Path) -> bool:
-    """ffmpeg 将 TS 转封装为 MP4"""
-    cmd = [
-        FFMPEG, "-i", str(ts_path),
-        "-c", "copy", "-bsf:a", "aac_adtstoasc",
-        str(mp4_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace",
-                                timeout=300)
-    except FileNotFoundError:
-        log.error("ffmpeg 未安装")
-        return False
-    if result.returncode != 0:
-        log.error(f"remux 失败: {result.stderr[-500:]}")
-        return False
-    size_mb = mp4_path.stat().st_size / 1024 / 1024
-    log.info(f"MP4 转封装完成: {mp4_path} ({size_mb:.1f} MB)")
-    return True
-
-
 def download_video(m3u8_text: str, m3u8_url: str, aes_key: bytes,
                    referer: str, output_path: Path) -> bool:
     """完整下载流程: 下载分片 → 解密 → 合并 → remux MP4"""
@@ -382,36 +307,9 @@ def download_video(m3u8_text: str, m3u8_url: str, aes_key: bytes,
     return True
 
 
-def extract_audio(video_path: Path, audio_path: Path):
-    """ffmpeg 从视频提取音频为 MP3"""
-    if audio_path.exists():
-        log.info(f"音频已存在，跳过: {audio_path}")
-        return True
-    if not video_path.exists():
-        return False
-    log.info(f"提取音频: {audio_path.name}")
-    cmd = [
-        FFMPEG, "-err_detect", "ignore_err",
-        "-i", str(video_path),
-        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-        str(audio_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return False
-    if result.returncode != 0:
-        log.error(f"音频提取失败: {result.stderr[-500:]}")
-        return False
-    size_mb = audio_path.stat().st_size / 1024 / 1024
-    log.info(f"音频提取完成: {audio_path} ({size_mb:.1f} MB)")
-    return True
-
-
 def process_xiaoe(task, config, creds):
     """处理小鹅通视频任务（入口）"""
-    page_url = task["source_url"]
+    page_url = task["source_huifang_url"]
     parsed = urlparse(page_url)
     referer = f"{parsed.scheme}://{parsed.netloc}/"
     log.info(f"处理小鹅通视频: {page_url}")
@@ -444,7 +342,7 @@ def process_xiaoe(task, config, creds):
             return
     else:
         log.info("无 AES 加密，使用 ffmpeg 直接下载")
-        if not ffmpeg_download_hls(m3u8_url, referer, video_path):
+        if not download_hls(m3u8_url, video_path, referer=referer):
             log.error("视频下载失败")
             return
 

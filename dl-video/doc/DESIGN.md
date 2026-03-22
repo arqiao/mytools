@@ -10,17 +10,18 @@
 - 缺少字幕或字幕质量差，需人工整理
 - 视频内容与教学文档不同步，补充信息散落各处
 
-**支持平台**（6个）：
-1. **飞书妙记**：双通道认证（Open API + Cookie），支持跨租户
-2. **腾讯会议**：最小化浏览器使用，API获取会议数据（纪要、时间轴、逐字稿）
-3. **知乎训练营**：多 API 端点尝试，雪花算法 ID 时间戳提取
-4. **小鹅通**：HLS AES-128 解密，多域名 cookie 注入
-5. **熊猫学院**：腾讯云 SimpleAES DRM 解密，RSA + AES-CBC 多层加密
-6. **淘宝直播**：螳螂直播 API，双 token 认证
+**支持平台**（7个）：
+1. **一堂**：AES 加密 API 认证，支持视频/音频/讨论区下载 + 文稿复制
+2. **飞书妙记**：双通道认证（Open API + Cookie），支持跨租户
+3. **腾讯会议**：最小化浏览器使用，API获取会议数据（纪要、时间轴、逐字稿）
+4. **知乎训练营**：多 API 端点尝试，雪花算法 ID 时间戳提取
+5. **小鹅通**：HLS AES-128 解密，多域名 cookie 注入
+6. **熊猫学院**：腾讯云 SimpleAES DRM 解密，RSA + AES-CBC 多层加密
+7. **淘宝直播**：螳螂直播 API，双 token 认证
 
 **核心功能**：
 - 五步流水线：视频下载 → 教学文档 → Whisper 字幕 → LLM 修订 → 补充内容提取
-- 统一配置管理：config.yaml（任务配置）+ credentials.yaml（敏感凭证）
+- 统一配置管理：config.yaml（步骤参数）+ input.yaml（任务列表与输入配置）+ credentials.yaml（敏感凭证）
 - 自动化处理：飞书 token 自动刷新、失败通知、断点续传
 
 ## 架构设计
@@ -29,12 +30,16 @@
 
 ```
 调度器 (s1_huifang.py)
-  ├── 飞书妙记模块     (s1_feishumiaoji.py)
-  ├── 腾讯会议模块     (s1_tencentmeeting.py)
-  ├── 知乎训练营模块   (s1_zhihu.py)
-  ├── 小鹅通模块       (s1_xiaoe.py)
-  ├── 熊猫学院模块     (s1_panda.py)
-  └── 淘宝直播模块     (s1_taobao.py)
+  ├── 一堂模块           (s1w_yitang_video.py)
+  ├── 飞书妙记模块       (s1w_feishumiaoji.py)
+  ├── 腾讯会议模块       (s1w_tencentmeeting.py)
+  ├── 知乎训练营模块     (s1w_zhihu.py)
+  ├── 小鹅通模块         (s1w_xiaoe.py)
+  ├── 熊猫学院模块       (s1w_panda.py)
+  └── 淘宝直播模块       (s1w_taobao.py)
+
+调度器 (s2_wiki.py)
+  └── 一堂文稿模块       (s2w_yitang_wiki.py)
 
 五步流水线 (run_pipeline.py)
   s1(视频下载) → s2(教学文档) → s3(Whisper字幕) → s4(字幕修订) → s5(生成Addon)
@@ -45,23 +50,44 @@
 ```
 dl-video/
 ├── cfg/
-│   ├── config.yaml          # 任务配置（视频源、LLM 参数）
+│   ├── config.yaml          # 步骤参数（LLM、输入输出路径、引擎配置）
+│   ├── input.yaml           # 任务列表与输入配置（tasks、输出目录、一堂专用配置）
 │   └── credentials.yaml     # 敏感凭证（token、cookie、secret）
 ├── src/
 │   ├── run_pipeline.py      # 五步流水线调度
 │   ├── s1_huifang.py        # Step1 调度器：按 source_type 分发
-│   ├── s1_feishumiaoji.py   # 飞书妙记下载模块
-│   ├── s1_tencentmeeting.py # 腾讯会议下载模块
-│   ├── s1_zhihu.py          # 知乎训练营下载模块
-│   ├── s1_xiaoe.py          # 小鹅通下载模块
-│   ├── s1_panda.py          # 熊猫学院下载模块
-│   ├── s1_taobao.py         # 淘宝直播下载模块
-│   ├── s2_wiki.py           # Step2: 下载教学文档 + 写入飞书 wiki
+│   ├── s1w_yitang_video.py  # 一堂视频下载模块
+│   ├── s1w_feishumiaoji.py  # 飞书妙记下载模块
+│   ├── s1w_tencentmeeting.py # 腾讯会议下载模块
+│   ├── s1w_zhihu.py         # 知乎训练营下载模块
+│   ├── s1w_xiaoe.py         # 小鹅通下载模块
+│   ├── s1w_panda.py         # 熊猫学院下载模块
+│   ├── s1w_taobao.py        # 淘宝直播下载模块
+│   ├── s2_wiki.py           # Step2 调度器：下载教学文档 + 写入飞书 wiki
+│   ├── s2w_yitang_wiki.py   # 一堂文稿复制模块
 │   ├── s3_subtitle.py       # Step3: MP3 → 字幕（Whisper fallback）
 │   ├── s4_srt_fix.py        # Step4: LLM 对比文档修订字幕
-│   └── s5_addon.py          # Step5: 提取字幕中的补充内容
-├── output/                  # 输出目录（视频、音频、字幕、文档）
-├── log-err/                 # 错误日志统一目录
+│   ├── s5_addon.py          # Step5: 提取字幕中的补充内容
+│   ├── url2md.py            # 飞书 wiki 转 markdown 工具
+│   ├── modules/             # 公共模块
+│   │   ├── __init__.py
+│   │   ├── ffmpeg_utils.py  # ffmpeg 工具（音频提取、HLS 下载、TS 合并、音频转换）
+│   │   ├── config_utils.py  # 配置加载（load_config、safe_filename）
+│   │   ├── feishu_auth.py   # 飞书 OAuth 授权工具
+│   │   ├── feishu_token.py  # 飞书 token 统一管理（刷新、请求头、wiki 解析）
+│   │   └── feishu_minutes.py # 飞书妙记公共工具（URL 解析、妙记信息查询）
+│   └── tools/               # 辅助工具脚本
+│       ├── model_downloader.py  # Whisper 模型下载工具
+│       └── filter_changelog.py
+├── prompt/                  # 提示词模板
+│   ├── srtfix-ref.md        # 字幕修订（有参照文档）
+│   ├── srtfix-noref.md      # 字幕修订（无参照文档）
+│   ├── addon-subtitle.md    # 补充内容提取（字幕）
+│   ├── addon-discussion.md  # 补充内容提取（讨论区）
+│   └── addon-digest.md      # 精华摘要
+├── output/                  # 默认输出目录（视频、音频、字幕、文档）
+├── out-yitang/              # 一堂任务专用输出目录
+├── log-err/                 # 日志统一目录（可通过 input.yaml 的 path_log_dir 配置）
 └── doc/                     # 项目文档
 ```
 
@@ -83,16 +109,60 @@ dl-video/
 
 ### Step1 调度器 (s1_huifang.py)
 
-读取 `config.yaml` 中的 `tasks` 列表，根据每个任务的 `source_type` 字段分发到对应平台模块。支持的 source_type：`feishu_minutes`、`tencent_meeting`、`zhihu`、`xiaoe`、`panda`、`taobao`。
+读取 `input.yaml` 中的 `tasks` 列表，根据每个任务的 `source_type` 字段分发到对应平台模块。支持的 source_type：`yitang`、`feishu_minutes`、`tencent_meeting`、`zhihu`、`xiaoe`、`panda`、`taobao`。
 
-### 飞书妙记 (s1_feishumiaoji.py)
+### 一堂 (s1w_yitang_video.py)
+
+**认证方式**：API token + user_id（从浏览器 Network 面板获取）
+
+**流程**：
+1. `fetch_replay_data(live_id)` — `GET /api/air/room/replay` 获取回放数据（视频URL、音频URL、讨论区）
+2. `fetch_live_title(source_url, live_id)` — 获取标题：
+   - 优先 `GET /api/air/room/info`（用 sid 参数）
+   - 其次 `GET /api/lesson/detail`（URL 带 lessonId 时）
+3. `extract_number_from_title(title)` — 从标题提取编号（如 "AI落地Live第69场" → "069"）
+4. `export_chats(chats, output_path, duration)` — 讨论区导出为 XLSX（轻量操作优先）
+5. `download_video(video_url, output_path)` — yt-dlp 下载 m3u8 视频（自带断点续传）
+6. `_download_m3u8(m3u8_url, output_path)` — ffmpeg fallback 下载（yt-dlp 失败时）
+7. 音频获取（优先服务端下载，失败则从本地视频提取）：
+   - `download_audio(audio_url, output_path)` — 流式下载音频 MP3
+   - 若服务端 404 或无 audioUrl，调用 `extract_audio()` 从视频文件提取
+
+**API 签名机制**：
+- 所有请求需携带 `x-token-1`（AES 加密的时间戳）和 `x-token-2`（HMAC-SHA256 签名）
+- 签名基于 URI + 参数 + 固定密钥，与 `s2w_yitang_wiki.py` 共用相同的加密常量
+
+**各要素获取方式详解**：
+
+| 要素 | 获取方式 | 说明 | 依赖 |
+|------|----------|------|------|
+| **liveId** | 直接从URL提取（正则） | URL路径 `/live/{liveId}` | 无 |
+| **标题** | API获取（room/info 或 lesson/detail） | 优先 room/info，其次 lesson/detail | liveId + token |
+| **视频URL** | API获取（room/replay） | 回放数据中的 `replay.url`（m3u8） | liveId + token |
+| **音频URL** | API获取（room/replay） | 回放数据中的 `replay.audioUrl` | liveId + token |
+| **讨论区** | API获取（room/replay） | 回放数据中的 `chats[]` 列表 | liveId + token |
+| **输出文件名** | 配置或标题推导 | 优先 output_name → 系列编号 → 标题 | 标题 |
+
+**输出文件**：
+- `{output_name}.ts` — 视频文件
+- `{output_name}.mp3` — 音频文件
+- `{output_name}.xlsx` — 讨论区（含时间轴、发言人、标签、内容）
+
+**踩坑记录**：
+- API 签名使用 AES-CBC 加密时间戳 + HMAC-SHA256，密钥硬编码在客户端 JS 中
+- AI落地Live 系列课程自动使用 `output_prefix` + 编号命名，非系列课程用标题命名
+- 讨论区导出为 XLSX 时需过滤 GBK 无法编码的 emoji（Unicode 码点 >= 0x10000）及 XML 非法控制字符（`\x00`-`\x1f` 中除 `\t\n\r` 外）
+- yt-dlp 下载失败时自动 fallback 到 ffmpeg 直接下载 m3u8
+- icon 标签映射优先从 API 动态加载，补充静态映射中没有的条目
+
+### 飞书妙记 (s1w_feishumiaoji.py)
 
 **认证方式**：双通道认证
 - Open API：user_access_token（OIDC refresh_token 自动刷新，`ensure_feishu_token()` 在过期前 300s 触发）
 - Cookie：browser_cookie（用于跨租户场景，Open API 无权限时 fallback）
 
-**API 流程**：
-1. `extract_minutes_token(url)` — 正则提取 URL 中的 minutes token（`/minutes/([A-Za-z0-9]+)`）
+**流程**：
+1. `extract_minutes_token(url)` — 正则提取 URL 中的 minutes token（`/minutes/([A-Za-z0-9]+)`）（定义在 `feishu_minutes.py`）
 2. `get_minutes_media(token, cookie)` — 用 cookie 请求妙记页面 HTML，解析 SSR 注入的 JSON 数据：
    - `video_url` — 视频流地址（飞书内部 CDN）
    - `web_vtt_url` — WebVTT 字幕地址
@@ -104,9 +174,11 @@ dl-video/
 6. `get_transcript()` — Open API `/minutes/v1/minutes/{token}/transcript` 获取文字记录
 7. `get_transcript_by_cookie()` — Cookie API `/minutes/api/subtitles` fallback（跨租户场景）
 
+**执行顺序**：字幕下载 + 文字记录获取（轻量操作优先）→ 视频下载 → 音频提取（大文件最后）
+
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
 | **minutes_token** | 直接从URL提取（正则） | URL中明文存在，无需额外请求 | 无 |
 | **标题** | 页面HTML解析（SSR JSON） | 嵌在页面SSR数据中，需解码Unicode转义 | minutes_token + cookie |
@@ -127,7 +199,7 @@ dl-video/
 - 视频下载服务器不一定支持 Range，`download_video()` 检测 status_code==200（非 206）时从头下载
 
 
-### 腾讯会议 (s1_tencentmeeting.py)
+### 腾讯会议 (s1w_tencentmeeting.py)
 
 **认证方式**：browser_cookie（通过 Playwright 注入）
 
@@ -204,7 +276,7 @@ dl-video/
 - 逐字稿 API 返回的时间戳是毫秒级，需转换为 SRT 格式（HH:MM:SS,mmm）
 
 
-### 知乎训练营 (s1_zhihu.py)
+### 知乎训练营 (s1w_zhihu.py)
 
 **认证方式**：browser_cookie
 
@@ -220,7 +292,7 @@ dl-video/
 
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
 | **course_id** | 直接从URL提取（正则） | URL路径中包含课程ID | 无 |
 | **video_id** | 直接从URL提取（正则） | URL路径中包含视频ID（雪花算法生成） | 无 |
@@ -239,7 +311,7 @@ dl-video/
 - video_id 是雪花算法生成的，可通过位运算提取时间戳
 
 
-### 小鹅通 (s1_xiaoe.py)
+### 小鹅通 (s1w_xiaoe.py)
 
 **认证方式**：browser_cookie（通过 Playwright 注入到多个小鹅通域名）
 
@@ -266,7 +338,7 @@ dl-video/
 
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
 | **app_id** | 直接从URL提取（正则） | URL域名中包含app_id，用于设置cookie域 | 无 |
 | **标题** | 浏览器提取（page.title） | SPA页面动态渲染，需等待JS执行 | cookie |
@@ -287,11 +359,11 @@ dl-video/
 - remux 时必须加 `-bsf:a aac_adtstoasc`，否则 MP4 容器中的 AAC 音频流格式不兼容
 
 
-### 熊猫学院 (s1_panda.py)
+### 熊猫学院 (s1w_panda.py)
 
 **认证方式**：Bearer JWT token（从浏览器 Network 面板获取）
 
-**API 流程**：
+**流程**：
 1. `extract_short_link(url)` — 从 URL 提取 shortLink（支持 `?param=xxx`、`/p/xxx`、`/playback/xxx` 三种格式）
 2. `get_invite_info(session, short_link)` — `GET /live-student/getInviteMsg` → 返回 inviteId, inviteUserId
 3. `get_course_info(session, invite_id)` — `POST /live-student/getCourse` → 课程名称、videoId、thirdPartyId（腾讯云 VOD fileId）、videoSource、isAllowPlayBack
@@ -338,7 +410,7 @@ dl-video/
 
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
 | **shortLink** | 直接从URL提取（正则） | URL中明文存在，支持3种格式 | 无 |
 | **inviteId** | API获取（getInviteMsg） | 通过shortLink换取邀请ID | shortLink + Bearer token |
@@ -360,14 +432,14 @@ dl-video/
 - 临时目录仅在 ffmpeg concat 成功后才 `shutil.rmtree` 清理，避免合并失败丢失已下载数据
 
 
-### 淘宝直播 (s1_taobao.py)
+### 淘宝直播 (s1w_taobao.py)
 
 **认证方式**：螳螂直播 API 双 token
 - `Authorization: Bearer {bearer_token}` — 主认证
 - `X-AuthorizationAccess: Bearer {access_token}` — 辅助认证
 - 额外 headers：`cid`（company_id）、`scene: browser`
 
-**API 流程**：
+**流程**：
 1. `parse_taobao_url(source_url)` — 正则提取 companyId 和 linkCode（`https://(\d+)\.tbkflow\.cn/pcLive/([0-9a-fA-F]+)`）
 2. `get_link_params(session, api_base, link_code)` — `POST /scrm-course-api/pass/linkParam/getParamByCode`
    - 自动尝试原始 linkCode 和去 `c` 前缀两种格式（有些 URL 带 c 前缀，有些不带）
@@ -383,7 +455,7 @@ dl-video/
 
 **各要素获取方式详解**：
 
-| 要素 | 获取方式 | 原因 | 依赖 |
+| 要素 | 获取方式 | 说明 | 依赖 |
 |------|----------|------|------|
 | **companyId** | 直接从URL提取（正则） | URL域名中包含公司ID | 无 |
 | **linkCode** | 直接从URL提取（正则） | URL路径中的十六进制代码 | 无 |
@@ -413,7 +485,7 @@ dl-video/
 
 **启动流程**：
 1. 加载 `credentials.yaml`，调用 `ensure_token()` 检查飞书 token 是否过期（过期前 60s 触发刷新）
-2. 读取 `config.yaml` 获取任务列表
+2. 读取 `input.yaml` 获取任务列表，检测 yitang 任务时自动切换输出目录到 `out-yitang/`
 3. 发送飞书群通知（开始）
 4. 依次执行 STEPS 列表中的脚本，每步用 `subprocess.Popen` 启动子进程
 5. 实时输出子进程 stdout 并写入日志文件（`log-err/{step_id}_pipeline.log`）
@@ -426,27 +498,25 @@ dl-video/
 
 ### Step1: 视频下载 (s1_huifang.py)
 
-**输入**：`config.yaml` 中的 tasks 列表
+**输入**：`input.yaml` 中的 tasks 列表
 **输出**：`output/{title}.ts` 或 `.mp4`、`output/{title}.mp3`、可能的 `_ori.srt`/`_ori.md`
 **逻辑**：遍历 tasks，按 `source_type` 动态 import 并调用对应模块的 `process_xxx()` 函数
 
 ### Step2: 教学文档 (s2_wiki.py)
 
-**输入**：`config.yaml` 中每个 task 的 `wiki_url`、`target_wiki_url`
-**依赖**：yitang 项目的 `url2md.feishu_url_to_md()` 和 `yitang_wiki.YitangCopier`
-**输出**：`output/{title}_wiki.md`
+**输入**：`input.yaml` 中每个 task 的 `source_wiki_url`、`target_wiki_url`
+**依赖**：`url2md.feishu_url_to_md()`（已内化）和 `s2w_yitang_wiki.YitangCopier`
+**输出**：`output/{title}_wiki.md`（普通任务）或 `out-yitang/{title}.md`（一堂任务）
 
 **逻辑**：
-1. `setup_yitang_path()` — 将 yitang/src 加入 sys.path，并同步 credentials.yaml 到 yitang 项目（避免 refresh_token 冲突）
-2. `download_wiki()` — 调用 yitang 的 `feishu_url_to_md()` 下载飞书 wiki 为 markdown
-3. `write_to_wiki()` — 如果配置了 target_wiki_url，将内容（addon > 修订字幕 > Whisper 修订字幕）写入飞书 wiki
-   - markdown 按行转为飞书 text/heading blocks
-   - 通过 docx API 批量创建 blocks（每批最多 50 个）
+1. 遍历 tasks，yitang 类型任务分发到 `s2w_yitang_wiki.process_yitang_wiki()`
+2. 其他类型：`download_wiki()` — 调用 `url2md.feishu_url_to_md()` 下载飞书 wiki 为 markdown
+3. `write_to_wiki()` — 如果配置了 target_wiki_url，将内容写入飞书 wiki
 
 ### Step3: Whisper 字幕 (s3_subtitle.py)
 
 **输入**：`output/{title}.mp3`（s1 产出的音频）
-**依赖**：yitang 项目的 `subtitle_from_mp3.transcribe_whisper()`
+**依赖**：`subtitle_from_mp3.transcribe_whisper()`（已内化）+ openai-whisper
 **输出**：`output/{title}_wm.srt`（Whisper 生成的字幕）
 **跳过条件**：如果 `output/{title}_ori.srt` 已存在（s1 已获取到字幕），则跳过
 
@@ -462,7 +532,7 @@ whisper:
 **输入**：
 - 字幕：`output/{title}_ori.srt`（优先）或 `output/{title}_wm.srt`
 - 教学文档：`output/{title}_wiki.md`（可选）
-**依赖**：yitang 项目的 `yitang_srt_fix` 模块
+**依赖**：`srt_fix` 模块（已内化）+ LLM API
 **输出**：
 - `output/{title}_ori_fix.srt` 或 `output/{title}_wm_fix.srt` — 修订后的字幕
 - `output/{title}_ori_fix_changelog.md` — 修订变更日志
@@ -487,8 +557,8 @@ llm:
 ```
 
 **修订策略**：
-- 有教学文档时使用 `prompt-srtfix-ref.md`（参考文档修订）
-- 无教学文档时使用 `prompt-srtfix-noref.md`（纯 ASR 纠错）
+- 有教学文档时使用 `srtfix-ref.md`（参考文档修订）
+- 无教学文档时使用 `srtfix-noref.md`（纯 ASR 纠错）
 - chunk_size: 80 条字幕为一批送 LLM
 
 ### Step5: 生成 Addon (s5_addon.py)
@@ -496,7 +566,7 @@ llm:
 **输入**：
 - 字幕：优先 `_ori_fix.srt` → `_wm_fix.srt` → `_ori.srt` → `_wm.srt`
 - 教学文档：`output/{title}_wiki.md`（可选）
-**依赖**：yitang 项目的 `yitang_addon` 模块
+**依赖**：`addon` 模块（已内化）+ LLM API
 **输出**：`output/{title}_addon.md` — 补充内容报告
 
 **逻辑**：
@@ -508,30 +578,94 @@ llm:
 
 ## 配置文件设计
 
-### config.yaml — 任务配置
+### config.yaml — 步骤参数
 
 ```yaml
-output_dir: "output"              # 输出目录（相对于项目根目录）
-yitang_dir: "../yitang"           # yitang 项目路径（s2/s3/s4/s5 依赖）
+# 各步骤输入配置
+input:
+  s4:
+    subtitle: ""         # 字幕文件路径
+    transcript: ""       # 逐字稿（文件路径或飞书 URL）
+  s5:
+    transcript: ""       # 逐字稿
+    subtitle: ""         # 字幕文件路径
+    discussion: ""       # 讨论区文件路径（.xlsx）
 
-tasks:                            # 任务列表，支持多个任务
-  - source_type: "feishu_minutes" # 平台类型：feishu_minutes|panda|xiaoe|taobao
-    source_url: "https://..."     # 视频源 URL（各平台格式不同，见 GUIDE.md）
-    wiki_url: "https://..."       # 关联的教学文档 URL（飞书 wiki，s2 下载用）
-    target_wiki_url: ""           # 写入目标飞书 wiki（s2 写入用，留空不写入）
-    title: ""                     # 手动指定标题（留空则自动从平台获取）
+# 各步骤输出配置
+output:
+  s4:
+    suffix: "_fix"       # 修正后字幕文件后缀
+  s5:
+    fnprefix: ""         # 输出文件名自定义前缀
 
-llm:                              # LLM 配置（s4 字幕修订、s5 addon 生成）
-  provider: "minimax"             # 提供商名称
+# 字幕引擎后缀映射
+s3_engine_suffix:
+  whisper_medium: "_wm"
+  whisper_large: "_wl"
+  # ...
+
+# 字幕修订配置
+s4_fix:
+  prompt: "srtfix-ref.md"
+  prompt_noref: "srtfix-noref.md"
+  chunk_size: 80
+  custom_dict: "srtfix-dict.yaml"
+
+# 补充内容提取配置
+s5_analysis:
+  chunk_size: 30000
+  prompt_subtitle: "addon-subtitle.md"
+  prompt_discussion: "addon-discussion.md"
+  prompt_digest: "addon-digest.md"
+
+# LLM 模型配置池
+llm_plan:
+  current_s4:
+    name: "minimax"
+    temperature: 0.2
+  current_s5:
+    name: "minimax"
+    temperature: 0.3
   minimax:
     model: "MiniMax-Text-01"
     base_url: "https://api.minimax.chat/v1"
     max_tokens: 8192
-    temperature: 0.3
+  # volcengine, dashscope, deepseek 等其他模型...
+```
 
-whisper:                          # Whisper 配置（s3 字幕生成）
-  model: "medium"                 # 模型大小：tiny|base|small|medium|large
-  force_cpu: false                # 强制 CPU 推理
+### input.yaml — 任务列表与输入配置
+
+```yaml
+titlePPL: ""                    # pipeline 专用标题前缀
+path_output_dir: "output/"      # 默认输出目录
+path_log_dir: "log-err/"        # 日志输出目录（所有模块共用）
+path_yitang_dir: "out-yitang/"  # 一堂任务专用输出目录
+titleShougong: ""               # 手工指定输入标题
+
+# 一堂 AILive 类课程的特殊处理
+s1_yitang_ailive:
+    output_prefix: "AI落地Live_"    # 视频文件命名约定
+    query_copystr: "AI落地Live"     # 全文复制的标题关键词
+
+# 一堂专题课 wiki 的复制范围
+s1_yitang_wikicopy:
+  start_heading: "开始上课"
+  end_heading: "作业与Candy"
+
+# 回放任务列表
+tasks:
+  - source_type: "yitang"
+    source_huifang_url: "https://air.yitang.top/live/xxx"
+    source_wiki_url: "https://yitang.top/fs-doc/xxx"
+    target_wiki_url: ""           # 写入目标飞书 wiki（留空则不写入）
+    title: ""                     # 手动指定标题（留空则自动获取）
+    output_name: ""               # 手动指定输出文件名（不含扩展名）
+
+  - source_type: "feishu_minutes"
+    source_huifang_url: "https://xxx.feishu.cn/minutes/xxx"
+    source_wiki_url: "https://xxx.feishu.cn/wiki/xxx"
+    target_wiki_url: ""
+    title: ""
 ```
 
 ### credentials.yaml — 敏感凭证（.gitignore）
@@ -539,6 +673,10 @@ whisper:                          # Whisper 配置（s3 字幕生成）
 按平台分区存放 token、cookie、secret 等认证信息。
 
 ```yaml
+yitang:
+  token: "xxx"                       # 一堂 API token
+  user_id: "xxx"                     # 一堂用户 ID
+
 feishu:
   app_id: "cli_xxx"                    # 飞书应用 ID
   app_secret: "xxx"                    # 飞书应用密钥
@@ -566,10 +704,267 @@ minimax:
   api_key: "xxx"                       # MiniMax API key（s4/s5 使用）
 ```
 
-### 辅助工具 auth.py
+### 辅助工具 modules/feishu_auth.py
 
-飞书 OAuth 授权工具，用于首次获取 user_access_token：
+飞书 OAuth 授权工具（位于 `src/modules/feishu_auth.py`），用于首次获取 user_access_token：
 - 启动本地 HTTP 服务器（localhost:8080）接收 OAuth 回调
 - 自动打开浏览器跳转飞书授权页面
 - 收到 authorization_code 后换取 user_access_token + refresh_token
 - 写回 credentials.yaml
+
+
+## 设计决策与经验总结（2026-03-16 ~ 03-22）
+
+本节记录项目从创建到当前状态的关键设计决策、方案取舍和踩坑经验。
+
+### 零、项目演进时间线
+
+```
+03-16  9fbaec1  项目创建 — 飞书妙记下载 + 五步流水线框架
+       8dde827  fix: s2 同步 credentials 到 yitang 避免 refresh_token 冲突
+       3898b65  feat: 新增熊猫学院下载框架
+       e227aef  feat: 实现腾讯云 SimpleAES DRM 解密
+03-17  93f5e25  feat: 新增小鹅通 HLS AES-128 解密下载
+03-18  d6f7626  refactor: 拆分 s1_huifang.py 为调度器 + 平台模块
+       4e74404  rename: s1_feishu.py → s1_feishumiaoji.py
+       654afa5  docs: 新增 DESIGN/CHANGELOG/GUIDE 三份文档
+       35e927c  docs: GUIDE.md → ReadMe.md，新增 QuickGuide.md
+03-19  8dc190a  feat: 新增腾讯会议 + 知乎模块，流水线支持任意步骤启动
+       29f5d97  simplify: 腾讯会议精简 — 去掉 meeting_id/auth_share_id
+       a4ed759  docs: 腾讯会议 API 精简后更新文档
+03-20  4598474  rename: 平台脚本统一改名 s1w_ 前缀
+       6b6c496  feat: s3 多引擎字幕重写 — 脱离 yitang
+       2a2b7d0  feat: s4 字幕修订重写 — 脱离 yitang
+       242b186  feat: s5 信息拓展重写 — 脱离 yitang
+03-21  247dd92  refactor: 分离 yitang 依赖，统一配置结构（config/input/credentials 三文件）
+              + 新增一堂视频/文稿模块（s1w_yitang_video, s2w_yitang_wiki）
+              + 抽离 feishu_minutes.py，消除 s2→s1w 跨层依赖
+              + auth.py → feishu_auth.py
+03-22         improve: s2w 日志系统重构（按文章独立日志 + 警告收集 + 上下文定位）
+              refactor: pathdir → path_output_dir，新增 path_log_dir，全模块配置驱动
+              improve: url2md.py -o 参数改为必填
+03-22~23      refactor: 新建 src/modules/ 公共模块包
+              + ffmpeg_utils.py — 统一 ffmpeg 调用（extract_audio、download_hls、remux_ts_to_mp4、concat_ts、mp3_to_wav、mp3_to_pcm）
+              + config_utils.py — 统一配置加载（load_config、safe_filename）
+              + feishu_auth/token/minutes 移入 modules/
+              improve: 一堂音频回退（服务端 MP3 不存在时从视频提取）
+              fix: 一堂讨论区 XLSX 导出过滤 XML 非法控制字符
+              improve: 一堂/飞书妙记执行顺序调整为"文本优先，大文件最后"
+              cleanup: _detect_url_type() 去掉 "fs" 兜底，未知类型给 warning
+```
+
+6 天内完成：7 个平台接入、5 步流水线独立化、3 轮架构重构。节奏很快，但每一步都有明确的驱动力（下文逐一展开）。
+
+### 一、架构演进：从 yitang 寄生到独立项目
+
+**背景**：dl-video 最初作为 yitang 项目的子模块存在，s2-s5 步骤通过 `sys.path.insert()` 引用 yitang 的代码（`subtitle_from_mp3.py`、`yitang_srt_fix.py`、`yitang_addon.py`、`yitang_wiki.py`）。随着平台增多，这种寄生关系带来了严重问题。
+
+**问题**：
+- 部署耦合：dl-video 无法独立运行，必须同时部署 yitang 项目
+- 路径脆弱：`sys.path.insert()` 依赖相对路径，目录结构变动即崩溃
+- credentials 冲突：两个项目共享 `credentials.yaml`，飞书 token 刷新互相覆盖（8dde827 修复过一次）
+- 配置散落：步骤参数分散在 yitang 的多个 config 文件中
+
+**方案对比**：
+
+| 方案 | 优点 | 缺点 | 结论 |
+|------|------|------|------|
+| 保持 sys.path 引用 | 零改动 | 部署耦合、路径脆弱、credentials 冲突 | 否决 |
+| pip install yitang 作为包 | 标准 Python 方式 | yitang 不是通用库，过度工程化 | 否决 |
+| 将核心逻辑内化到 dl-video | 彻底解耦，独立部署 | 一次性工作量大，后续需同步维护两份代码 | **采用** |
+
+**执行**（247dd92）：
+- s3_subtitle.py：内化 Whisper 调用 + 讯飞/火山/阿里多引擎支持，新增 `model_downloader.py` 管理模型缓存
+- s4_srt_fix.py：内化 LLM 字幕修订，提示词文件从 yitang cfg 复制到 `prompt/` 目录
+- s5_addon.py：内化信息拓展 + 精华摘要，新增 `url2md.py` 处理飞书文档转 markdown
+- 配置统一为 `config.yaml`（步骤参数）+ `input.yaml`（任务列表）+ `credentials.yaml`（凭证）
+
+**经验**：内化后 yitang 项目的对应模块仍保留，作为"上游参考"。两边独立演进，不再尝试同步。事实证明这是正确的——内化后 dl-video 的 s4/s5 已经根据自身需求做了大量定制，与 yitang 版本差异越来越大。
+
+### 二、s1_huifang.py 的拆分：从单体到调度器
+
+**背景**：项目初版（9fbaec1）只有飞书妙记一个平台，所有下载逻辑都在 `s1_huifang.py` 中（423 行）。随着熊猫学院、小鹅通陆续加入，单文件膨胀到不可维护。
+
+**拆分过程**（d6f7626）：
+- `s1_huifang.py` 从 423 行缩减为纯调度器（~80 行），只做 `source_type` 分发
+- 飞书妙记逻辑提取为 `s1_feishu.py`（后改名 `s1w_feishumiaoji.py`）
+- 各平台模块统一暴露 `process_xxx(task, config, creds)` 入口函数
+
+**设计约定**：
+- 调度器只负责遍历 tasks + 动态 import + 调用入口函数，不包含任何平台逻辑
+- 平台模块可独立运行（有 `__main__` 入口），也可被调度器调用
+- 新增平台只需：新建 `s1w_xxx.py` + 在调度器加一行 `from s1w_xxx import process_xxx`
+
+### 三、模块命名：s1w_ / s2w_ 前缀约定
+
+**背景**：最初所有平台模块都叫 `s1_xxx.py`，与调度器 `s1_huifang.py` 同名前缀，容易混淆。
+
+**方案对比**：
+
+| 方案 | 示例 | 优点 | 缺点 |
+|------|------|------|------|
+| 放入 `platforms/` 子目录 | `platforms/feishumiaoji.py` | 物理隔离 | 需要 `__init__.py`，import 路径变长 |
+| 加 `w` 后缀区分 | `s1w_feishumiaoji.py` | 最小改动，一眼区分调度器和平台模块 | 命名不够"标准" |
+| 加 `_worker` 后缀 | `s1_feishumiaoji_worker.py` | 语义明确 | 文件名太长 |
+
+**结论**：采用 `s1w_` 前缀（w = worker），改动最小且足够清晰。调度器保持 `s1_`/`s2_`，平台模块用 `s1w_`/`s2w_`。
+
+### 四、公共模块抽离：modules/ 目录
+
+**背景**：飞书相关功能散落在多个文件中，且存在跨层依赖（s2_wiki.py 反向 import s1w_feishumiaoji.py 的函数）。ffmpeg 调用、配置加载、文件名安全化等工具函数在 10+ 个文件中重复。
+
+**演进过程**：
+1. `feishu_token.py`（最早抽出）：token 刷新、请求头、wiki 解析 — 被 6 个文件依赖
+2. `feishu_minutes.py`（本次抽出）：妙记 URL 解析 + 信息查询 — 消除 s2→s1w 跨层依赖
+3. `feishu_auth.py`（本次改名）：OAuth 授权工具 — 与上述两个模块形成统一命名
+4. `ffmpeg_utils.py`：统一 ffmpeg 调用（find_ffmpeg、extract_audio、download_hls、remux_ts_to_mp4、concat_ts、mp3_to_wav、mp3_to_pcm）— 消除 6+ 个文件中的重复代码
+5. `config_utils.py`：统一配置加载（load_config、safe_filename）— 消除 10+ 个文件中的重复代码
+6. 以上模块统一移入 `src/modules/` 目录，形成独立的公共模块包
+
+**设计原则**：
+- 公共模块只放"被多个层级调用"的函数，不做过度抽象
+- 仅在一个模块内使用的函数留在原处，不为了"整洁"而搬动
+- `url2md.py` → `s2w_yitang_wiki.YitangCopier` 的依赖虽然跨层，但属于合理复用（YitangCopier 的加密/认证体系深度耦合，拆分成本远大于收益），不做处理
+
+### 五、浏览器使用策略：能不用就不用
+
+**经验**：Playwright 无头浏览器是最后手段，不是首选。
+
+各平台的浏览器使用程度：
+
+| 平台 | 浏览器使用 | 原因 |
+|------|-----------|------|
+| 飞书妙记 | 不用 | Open API + Cookie API 覆盖所有需求 |
+| 腾讯会议 | 最小化使用 | 仅提取 recording_id、视频URL、cookies；数据全走 API |
+| 知乎 | API 优先，浏览器 fallback | 多个 API 端点尝试，全失败才用 Playwright 拦截 m3u8 |
+| 小鹅通 | 必须使用 | SPA 页面，m3u8 URL 只能通过网络请求拦截获取 |
+| 熊猫学院 | 不用 | 纯 API 链路（shortLink → invite → course → videoSign → DRM） |
+| 淘宝/一堂 | 不用 | 纯 API |
+
+**原因**：
+- 浏览器启动慢（2-5 秒）、资源占用高（200-500MB 内存）
+- SPA 页面渲染不确定，等待时间难以精确控制（小鹅通需等 12 秒）
+- Cookie/登录状态管理复杂，跨域注入容易遗漏
+- 调试困难：无头模式下看不到页面状态
+
+**腾讯会议的精简过程**是典型案例：
+1. 初版：浏览器提取 meeting_id、recording_id、auth_share_id、视频URL、cookies、标题、日期、时间轴、纪要
+2. 发现 API 仅需 recording_id + cookies → 去掉 meeting_id、auth_share_id
+3. 日期从视频 URL 解析（`TM-YYYYMMDD`）→ 不再从页面文本提取
+4. 纪要/时间轴改用 API → 不再解析页面文本
+5. 最终：浏览器只做 4 件事（recording_id、视频URL、cookies、标题），其余全走 API
+
+### 六、DRM 解密：逆向工程的边界
+
+**熊猫学院的腾讯云 SimpleAES DRM** 是本周技术难度最高的部分。
+
+**关键发现**：
+- 腾讯云 tcplayer 的 RSA 公钥是硬编码在 JS 中的（1024-bit），不会变
+- overlay_key/iv 必须是 hex 字符串（32 字符），不是原始 16 字节 — 这个坑浪费了大量时间
+- license 返回的 base_key 恰好 16 字节，AES-CBC 解密后取前 16 字节即为 real_key（无 PKCS7 填充）
+- master m3u8 URL 的 drmToken 是插入到文件名前缀（`voddrm.token.{drmToken}.`），不是 query 参数
+
+**小鹅通的 HLS AES-128** 相对简单，但也有坑：
+- m3u8 URL 含签名参数（`whref`），有时效性，Playwright 捕获后必须立即下载
+- IV 可能在 m3u8 中显式指定，也可能缺失（默认全零 16 字节），两种情况都要处理
+- TS 分片下载需要重试机制（CDN 偶发超时），指数退避 2s/4s/6s
+
+### 七、配置架构：三文件分离
+
+**演进**：
+- 初版：所有配置塞在一个 `config.yaml` 里
+- 中期：config.yaml 膨胀到难以维护，任务列表和步骤参数混在一起
+- 现在：三文件分离
+
+| 文件 | 内容 | 变更频率 |
+|------|------|----------|
+| `config.yaml` | 步骤参数（LLM、引擎、prompt 路径） | 低，调好后很少改 |
+| `input.yaml` | 任务列表 + 输出目录 + 一堂专用配置 | 高，每次任务都改 |
+| `credentials.yaml` | token、cookie、secret | 中，token 过期时改 |
+
+**好处**：
+- `credentials.yaml` 加入 `.gitignore`，不会误提交敏感信息
+- `input.yaml` 频繁修改不会干扰步骤参数
+- 三个文件职责清晰，不会出现"改了一个配置影响了不相关的功能"
+
+### 八、腾讯会议 API 精简：从 260318 快照到最终版
+
+**对比**（DESIGN-260318.md 快照 vs 当前版本）：
+
+260318 快照中腾讯会议模块的设计：
+- 浏览器提取 4 项：meeting_id、recording_id、视频URL、cookies
+- API 调用需要 sharing_id 作为 `auth_share_id` 参数
+- 标题和日期通过 `get-multi-record-info` API 获取
+- 时间轴通过 `get-multi-record-timeline` API 获取
+- 函数名为 `extract_meeting_id()`（语义不准确，实际提取的是 sharing_id）
+
+精简后的变化：
+- 去掉 meeting_id — API 实测不需要
+- 去掉 auth_share_id（即 sharing_id）— API 实测不需要
+- 标题改从浏览器 DOM 提取 — `get-multi-record-info` 在浏览器外部返回空数据
+- 日期改从视频 URL 解析（`TM-YYYYMMDD`）— 更可靠
+- 时间轴/纪要改用 `query-timeline` 和 `query-summary-and-note` — 仅需 recording_id + cookies
+- `extract_meeting_id()` 重命名为 `extract_sharing_id()` — 语义准确
+
+**教训**：初版设计时参考了浏览器 DevTools 中看到的所有参数，以为都是必需的。实际上很多 API 参数是"传了不报错但不影响结果"的冗余参数。正确做法是从最少参数开始测试。
+
+### 九、配置字段重命名与 LLM 配置演进
+
+**字段重命名**（247dd92）：
+- `source_url` → `source_huifang_url` — 明确是回放视频 URL，与 `source_wiki_url` 对称
+- `wiki_url` → `source_wiki_url` — 加 `source_` 前缀，与 `target_wiki_url` 对称
+- `output_dir` → `path_output_dir` — 与 `path_yitang_dir`、`path_log_dir` 风格统一
+
+**LLM 配置演进**：
+- 初版（260318 快照）：`llm` 单模型配置，provider + 一个模型参数块
+- 现在：`llm_plan` 多模型池，`current_s4`/`current_s5` 指定各步骤使用哪个模型
+- 好处：s4 和 s5 可以用不同模型（如 s4 用低温度保证准确性，s5 用高温度增加创造性），切换模型只需改 `current_s4.name`，不用改模型参数
+
+### 十、s2w 日志系统：按文章独立日志 + 双通道记录
+
+**背景**：s2w_yitang_wiki.py 原来只有一个固定的 `s2w_yitang_wiki.log`，多篇文章的日志混在一起，且跳过块和警告信息缺乏上下文，难以定位问题在原文中的位置。
+
+**方案**：
+- 主运行日志按文章独立生成：`wiki_{标题}_{时间戳}.log`，模块级只保留 console 输出
+- 警告及错误日志：`err_{标题}_{时间戳}.log`，统一记录跳过块和警告信息
+- 通过动态 FileHandler 实现：`_start_article_log()` 添加 handler，`_stop_article_log()` 移除
+- 所有问题同时输出到主日志和错误日志，便于对照查阅
+
+**上下文定位**：
+- 每个跳过块/警告记录包含：block 位置（第N/M个）、block_id、parent_id、文本预览、所在章节
+- 上下文包含前2段和后2段内容（各80字），通过 `_fmt_context()` 统一格式化
+- block 类型使用 `_BLOCK_TYPE_NAMES` 中文名称映射（如 type=27 → "图片"）
+
+### 十一、配置驱动的日志和输出目录
+
+**背景**：所有模块原来硬编码 `LOG_DIR = PROJECT_DIR / "log-err"`，修改日志目录需要改 16 个文件。
+
+**方案**：
+- `input.yaml` 新增 `path_log_dir` 字段（默认 `"log-err/"`）
+- `pathdir` 重命名为 `path_output_dir`，与 `path_log_dir`、`path_yitang_dir` 风格统一
+- 所有 16 个源文件改为模块级读取 `input.yaml`：
+  ```python
+  _input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+  LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+  ```
+- 修改日志目录只需改一处配置
+
+### 十二、踩坑备忘
+
+**credentials 冲突**（8dde827）：dl-video 和 yitang 共享同一个 `credentials.yaml` 时，两边都会刷新飞书 token 并写回文件。A 刷新后 B 读到旧的 refresh_token 再刷新就会失败（refresh_token 是一次性的）。解决方案：独立化后各自维护自己的 credentials。
+
+**飞书妙记 Unicode 转义**：页面 HTML 中的视频/字幕 URL 嵌在 SSR 渲染的 JSON 中，含 `\uXXXX` 转义。直接正则匹配 URL 会失败，必须先 `decode_unicode_escapes()` 解码整段 JSON 再提取。
+
+**腾讯会议 API 的"假参数"**：初版代码传了 meeting_id、sharing_id、auth_share_id 等一堆参数给 API，实测发现三个 API 只认 recording_id + cookies，其余参数完全无效。教训：先用最少参数测试，再逐步添加，而不是一开始就传所有能拿到的参数。
+
+**ffmpeg 音频提取容错**：部分平台的视频流有小错误（如淘宝直播的 TS 流），ffmpeg 默认会中断。加 `-err_detect ignore_err` 可以容忍这些错误继续提取音频。
+
+**Whisper 模型缓存**：`faster-whisper` 默认每次启动都联网检查模型版本，在离线环境会超时失败。`model_downloader.py` 的 `get_model_path()` 优先返回本地缓存路径，避免联网检查。
+
+**飞书妙记跨租户双通道**：同一个飞书应用的 user_access_token 只能访问本租户的妙记。跨租户（如 waytoagi.feishu.cn）必须用 browser_cookie 走 Cookie API。Cookie API 的 transcript 数据结构与 Open API 不同（`sentences[].contents[]` vs 直接 `text`），代码中需要归一化处理。
+
+**小鹅通多域名 cookie 注入**：小鹅通有 4 个域名后缀（`.xiaoecloud.com`、`.xiaoeknow.com`、`.xiaoe-tech.com`、`.xet.citv.cn`），SPA 加载时会跨域请求。如果只给当前域名注入 cookie，其他域名的请求会因无认证而失败。必须在 Playwright 启动时为所有域名预设 cookie。
+
+**淘宝直播 linkCode 双格式**：URL 中的 linkCode 有带 `c` 前缀和不带两种格式，API 端两种都可能有效。代码自动尝试两种，先试原始值，失败后去掉 `c` 前缀重试。
+
+**视频下载断点续传的局限**：飞书妙记的视频 CDN 不一定支持 HTTP Range。`download_video()` 检测到 status_code==200（而非 206）时放弃续传，从头下载。熊猫学院的分片下载则通过临时目录实现续传——已解密的分片保留在 `_tmp_{stem}/` 中，中断后重新运行跳过已有分片。

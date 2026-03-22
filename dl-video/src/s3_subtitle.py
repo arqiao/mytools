@@ -28,7 +28,9 @@ import requests
 import yaml
 from faster_whisper import WhisperModel
 
-from model_downloader import ensure_model
+from tools.model_downloader import ensure_model
+from modules.ffmpeg_utils import mp3_to_wav, mp3_to_pcm
+from modules.config_utils import load_config as _load_config
 
 # 繁体转简体转换器
 _t2s = opencc.OpenCC("t2s")
@@ -36,7 +38,8 @@ _t2s = opencc.OpenCC("t2s")
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -49,7 +52,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-FEISHU_BASE = "https://open.feishu.cn/open-apis"
+from modules.feishu_token import FEISHU_BASE, ensure_feishu_token
 
 # 讯飞语音转写 API 地址
 XUNFEI_UPLOAD_URL = "https://raasr.xfyun.cn/v2/api/upload"
@@ -57,9 +60,9 @@ XUNFEI_GET_RESULT_URL = "https://raasr.xfyun.cn/v2/api/getResult"
 
 
 def load_config():
-    """加载凭证配置"""
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """加载凭证配置（兼容旧调用：仅返回 creds）"""
+    _, creds = _load_config()
+    return creds
 
 
 def get_engine_suffix(engine_name: str) -> str:
@@ -84,46 +87,7 @@ def format_srt_time(seconds: float) -> str:
 
 def _prepare_audio_for_whisper(audio_path: Path) -> Path:
     """将音频预处理为 16kHz 单声道 WAV，减少 Whisper 内存占用"""
-    wav_path = audio_path.with_suffix(".16k.wav")
-    if wav_path.exists():
-        log.info(f"预处理音频已存在，跳过: {wav_path}")
-        return wav_path
-
-    try:
-        import av
-        import wave
-        import struct
-
-        log.info(f"预处理音频为 16kHz WAV（使用 PyAV）...")
-        container = av.open(str(audio_path))
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
-
-        with wave.open(str(wav_path), "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(16000)
-            for frame in container.decode(audio=0):
-                resampled = resampler.resample(frame)
-                for r in resampled:
-                    wf.writeframes(r.to_ndarray().tobytes())
-
-        container.close()
-        log.info(f"预处理完成: {wav_path} ({wav_path.stat().st_size / 1024 / 1024:.1f} MB)")
-        return wav_path
-
-    except ImportError:
-        # 回退到 ffmpeg 命令行
-        cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ar", "16000", "-ac", "1",
-            str(wav_path),
-        ]
-        log.info(f"预处理音频为 16kHz WAV（使用 ffmpeg）...")
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg 转换失败: {result.stderr.decode(errors='replace')}")
-        log.info(f"预处理完成: {wav_path} ({wav_path.stat().st_size / 1024 / 1024:.1f} MB)")
-        return wav_path
+    return mp3_to_wav(audio_path)
 
 
 def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: bool = False) -> Path | None:
@@ -131,7 +95,7 @@ def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: b
     try:
         # 确保模型已下载
         if not ensure_model(model_size):
-            log.error(f"模型 {model_size} 不可用，请先运行: python src/model_downloader.py {model_size}")
+            log.error(f"模型 {model_size} 不可用，请先运行: python src/tools/model_downloader.py {model_size}")
             return None
 
         # 预处理：大文件先转为 16kHz WAV
@@ -157,7 +121,7 @@ def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: b
 
         log.info(f"加载 Whisper {model_size} 模型 ({device}/{compute_type})...")
         # 优先用本地缓存路径加载，避免每次联网检查版本
-        from model_downloader import get_model_path
+        from tools.model_downloader import get_model_path
         local_path = get_model_path(model_size)
         model_ref = local_path or model_size
         model = WhisperModel(model_ref, device=device, compute_type=compute_type)
@@ -385,86 +349,10 @@ def _xunfei_parse_result(audio_path: Path, result: dict) -> Path | None:
         return None
 
 
-def ensure_feishu_token(creds: dict, session: requests.Session) -> str:
-    """确保飞书 token 有效"""
-    expire = creds["feishu"].get("user_token_expire_time", 0)
-    if time.time() > expire - 300:
-        # 刷新 token
-        url = f"{FEISHU_BASE}/authen/v1/oidc/refresh_access_token"
-        body = {
-            "grant_type": "refresh_token",
-            "refresh_token": creds["feishu"]["user_refresh_token"],
-        }
-        # 获取 app token
-        app_resp = session.post(
-            f"{FEISHU_BASE}/auth/v3/app_access_token/internal",
-            json={
-                "app_id": creds["feishu"]["app_id"],
-                "app_secret": creds["feishu"]["app_secret"],
-            },
-            timeout=15
-        )
-        app_data = app_resp.json()
-        app_token = app_data.get("app_access_token", "")
-
-        headers = {
-            "Authorization": f"Bearer {app_token}",
-            "Content-Type": "application/json; charset=utf-8",
-        }
-        resp = session.post(url, json=body, headers=headers, timeout=15)
-        data = resp.json()
-
-        if data.get("code") != 0:
-            raise RuntimeError(f"飞书 token 刷新失败: {data}")
-
-        token_data = data["data"]
-        creds["feishu"]["user_access_token"] = token_data["access_token"]
-        creds["feishu"]["user_refresh_token"] = token_data["refresh_token"]
-        creds["feishu"]["user_token_expire_time"] = int(time.time()) + token_data["expires_in"]
-
-        # 持久化
-        with open(CFG_DIR / "credentials.yaml", "w", encoding="utf-8") as f:
-            yaml.dump(creds, f, allow_unicode=True)
-        log.info("飞书 token 已刷新")
-
-    return creds["feishu"]["user_access_token"]
-
 
 def _audio_to_pcm(audio_path: Path) -> Path:
     """将音频转为 PCM（16kHz, 16bit, 单声道）"""
-    pcm_path = audio_path.with_suffix(".pcm")
-    if pcm_path.exists():
-        log.info(f"PCM 文件已存在，跳过转换: {pcm_path}")
-        return pcm_path
-
-    try:
-        import av
-
-        log.info(f"转换音频为 PCM（使用 PyAV）: {audio_path}")
-        container = av.open(str(audio_path))
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
-
-        with open(pcm_path, "wb") as f:
-            for frame in container.decode(audio=0):
-                resampled = resampler.resample(frame)
-                for r in resampled:
-                    f.write(r.to_ndarray().tobytes())
-
-        container.close()
-
-    except ImportError:
-        cmd = [
-            "ffmpeg", "-y", "-i", str(audio_path),
-            "-ar", "16000", "-ac", "1", "-f", "s16le",
-            str(pcm_path),
-        ]
-        log.info(f"转换音频为 PCM（使用 ffmpeg）: {audio_path}")
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg 转换失败: {result.stderr.decode(errors='replace')}")
-
-    log.info(f"PCM 转换完成: {pcm_path} ({pcm_path.stat().st_size / 1024 / 1024:.1f} MB)")
-    return pcm_path
+    return mp3_to_pcm(audio_path)
 
 
 def _get_app_token(creds: dict, session: requests.Session) -> str:

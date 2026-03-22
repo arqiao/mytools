@@ -11,11 +11,15 @@ import requests
 import yaml
 from openpyxl import load_workbook
 
+from modules.config_utils import load_config
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+PROMPT_DIR = PROJECT_DIR / "prompt"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -27,19 +31,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# 配置加载
-# ---------------------------------------------------------------------------
-
-def load_config():
-    """加载 addon 配置和凭证"""
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +209,8 @@ class LLMClient:
 # ---------------------------------------------------------------------------
 
 def load_prompt(filename):
-    """从 cfg 目录加载提示词文件"""
-    prompt_path = CFG_DIR / filename
+    """从 prompt 目录加载提示词文件"""
+    prompt_path = PROMPT_DIR / filename
     if not prompt_path.exists():
         raise FileNotFoundError(f"提示词文件不存在: {prompt_path}")
     return prompt_path.read_text(encoding="utf-8").strip()
@@ -548,13 +539,13 @@ def main():
         config["llm_plan"]["current_s5"]["name"] = args.provider
 
     # 输入文件：CLI 参数优先于配置文件
-    inputs = config.get("s5_input", {})
+    inputs = config.get("input", {}).get("s5", {})
     subtitle_path = args.subtitle or inputs.get("subtitle", "")
     transcript_src = args.transcript or inputs.get("transcript", "")
     discussion_path = args.discussion or inputs.get("discussion", "")
 
     # 相对路径基于 output 目录
-    base_dir = PROJECT_DIR / config.get("s5_output", {}).get("dir", "output")
+    base_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
 
     def resolve_path(p):
         """相对路径拼接 base_dir，绝对路径直接用"""
@@ -660,16 +651,24 @@ def main():
     # 初始化 LLM 客户端
     llm = LLMClient(config, creds)
     analysis_cfg = config.get("s5_analysis", {})
-    prompt_subtitle = load_prompt(analysis_cfg.get("prompt_subtitle", "prompt-subtitle.md"))
-    prompt_discussion = load_prompt(analysis_cfg.get("prompt_discussion", "prompt-discussion.md"))
+    prompt_subtitle = load_prompt(analysis_cfg.get("prompt_subtitle", "addon-subtitle.md"))
+    prompt_discussion = load_prompt(analysis_cfg.get("prompt_discussion", "addon-discussion.md"))
     chunk_size = analysis_cfg.get("chunk_size", 30000)
-    output_dir = Path(config.get("s5_output", {}).get("dir", "output"))
+    # 输出目录跟随输入文件所在目录
+    if subtitle_path and Path(subtitle_path).exists():
+        output_dir = Path(subtitle_path).parent
+    elif discussion_path and Path(discussion_path).exists():
+        output_dir = Path(discussion_path).parent
+    elif transcript_path and Path(transcript_path).exists():
+        output_dir = Path(transcript_path).parent
+    else:
+        output_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
     if not output_dir.is_absolute():
         output_dir = PROJECT_DIR / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 生成输出文件名前缀：优先字幕文件名 > 讨论区文件名 > 逐字稿
-    prefix = config.get("s5_output", {}).get("prefix", "")
+    prefix = config.get("output", {}).get("s5", {}).get("fnprefix", "")
     if not prefix:
         if subtitle_path and Path(subtitle_path).exists():
             # 去掉 _wm 后缀，如 AI落地Live_069_wm.srt → AI落地Live_069
@@ -754,7 +753,7 @@ def main():
         if not args.no_digest:
             log.info("=== 生成精华摘要 ===")
             prompt_digest = load_prompt(
-                analysis_cfg.get("prompt_digest", "prompt-digest.md")
+                analysis_cfg.get("prompt_digest", "addon-digest.md")
             )
             digest_reply = llm.chat(prompt_digest, report_content)
             # 清理 LLM 可能包裹的 code fence

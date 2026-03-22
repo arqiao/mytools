@@ -7,17 +7,22 @@
 
 import logging
 import re
-import subprocess
 from pathlib import Path
 
 import requests
 import yaml
 
+from modules.feishu_token import FEISHU_BASE, ensure_feishu_token
+from modules.feishu_minutes import extract_minutes_token, get_minutes_info
+from modules.ffmpeg_utils import extract_audio
+from modules.config_utils import safe_filename
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -30,75 +35,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-FEISHU_BASE = "https://open.feishu.cn/open-apis"
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
-
-
-def safe_filename(title: str) -> str:
-    return ILLEGAL_CHARS.sub("_", title).strip()
-
-
-def ensure_feishu_token(creds, session):
-    """确保飞书 user_access_token 有效，过期则刷新"""
-    import time
-    expire = creds["feishu"].get("user_token_expire_time", 0)
-    if time.time() < expire - 300:
-        return creds["feishu"]["user_access_token"]
-
-    app_resp = session.post(
-        f"{FEISHU_BASE}/auth/v3/app_access_token/internal",
-        json={
-            "app_id": creds["feishu"]["app_id"],
-            "app_secret": creds["feishu"]["app_secret"],
-        },
-        timeout=15,
-    )
-    app_token = app_resp.json().get("app_access_token", "")
-
-    resp = session.post(
-        f"{FEISHU_BASE}/authen/v1/oidc/refresh_access_token",
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": creds["feishu"]["user_refresh_token"],
-        },
-        headers={"Authorization": f"Bearer {app_token}"},
-        timeout=15,
-    )
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"飞书 token 刷新失败: {data}")
-
-    td = data["data"]
-    creds["feishu"]["user_access_token"] = td["access_token"]
-    creds["feishu"]["user_refresh_token"] = td["refresh_token"]
-    creds["feishu"]["user_token_expire_time"] = int(time.time()) + td["expires_in"]
-
-    with open(CFG_DIR / "credentials.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(creds, f, allow_unicode=True)
-    log.info("飞书 token 已刷新")
-    return td["access_token"]
-
-
-def extract_minutes_token(url: str) -> str:
-    m = re.search(r"/minutes/([A-Za-z0-9]+)", url)
-    if not m:
-        raise ValueError(f"无法从 URL 提取妙记 token: {url}")
-    return m.group(1)
-
-
-def get_minutes_info(token, user_token, session):
-    url = f"{FEISHU_BASE}/minutes/v1/minutes/{token}"
-    headers = {"Authorization": f"Bearer {user_token}"}
-    resp = session.get(url, headers=headers, timeout=15)
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"获取妙记信息失败: {data}")
-    minute = data["data"]["minute"]
-    title = minute.get("title", token)
-    duration = minute.get("duration", "")
-    log.info(f"妙记标题: {title}, 时长: {duration}")
-    return title, duration
 
 
 def get_minutes_media(token, cookie, session, source_url):
@@ -253,35 +189,6 @@ def vtt_to_srt(vtt_text):
     return "\n".join(srt_lines)
 
 
-def extract_audio_from_video(video_path, audio_path):
-    """用 ffmpeg 从视频中提取音频为 MP3"""
-    if audio_path.exists():
-        log.info(f"音频已存在，跳过: {audio_path}")
-        return True
-    if not video_path.exists():
-        log.warning(f"视频文件不存在，无法提取音频: {video_path}")
-        return False
-    log.info(f"从视频提取音频: {audio_path.name}")
-    cmd = [
-        "ffmpeg", "-i", str(video_path),
-        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-        str(audio_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        log.warning("ffmpeg 未安装或不在 PATH 中，跳过音频提取。"
-                    "请安装 ffmpeg 后重新运行")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg 提取音频失败: {result.stderr[:500]}")
-        return False
-    size_mb = audio_path.stat().st_size / 1024 / 1024
-    log.info(f"音频提取完成: {audio_path} ({size_mb:.1f} MB)")
-    return True
-
-
 def ms_to_srt(ms):
     if isinstance(ms, str):
         ms = int(ms)
@@ -384,7 +291,7 @@ def _save_transcript(paragraphs, output_dir, base_name, source=""):
 def process_feishu_minutes(task, config, creds):
     """处理飞书妙记任务（入口）"""
     session = requests.Session()
-    source_url = task["source_url"]
+    source_url = task["source_huifang_url"]
     token = extract_minutes_token(source_url)
     log.info(f"处理飞书妙记: token={token}")
 
@@ -394,7 +301,7 @@ def process_feishu_minutes(task, config, creds):
         token, cookie, session, source_url
     )
 
-    manual_title = task.get("title", "")
+    manual_title = config.get("titleShougong", "") or task.get("title", "")
     if manual_title:
         title = manual_title
         log.info(f"使用手动指定标题: {title}")
@@ -409,15 +316,10 @@ def process_feishu_minutes(task, config, creds):
             title = token
 
     base_name = safe_filename(title)
-    output_dir = PROJECT_DIR / config.get("output_dir", "output")
+    output_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
     output_dir.mkdir(exist_ok=True)
 
-    video_path = output_dir / f"{base_name}.ts"
-    download_video(video_url, video_path, cookie)
-
-    audio_path = output_dir / f"{base_name}.mp3"
-    extract_audio_from_video(video_path, audio_path)
-
+    # 轻量操作优先：字幕 + 文字记录
     download_vtt_subtitle(vtt_url, output_dir, base_name, cookie)
 
     got_transcript = False
@@ -435,5 +337,12 @@ def process_feishu_minutes(task, config, creds):
                 token, cookie, session, source_url, output_dir, base_name)
         except Exception as e:
             log.warning(f"Cookie API 获取文字记录失败: {e}")
+
+    # 大文件最后：下载视频 + 提取音频
+    video_path = output_dir / f"{base_name}.ts"
+    download_video(video_url, video_path, cookie)
+
+    audio_path = output_dir / f"{base_name}.mp3"
+    extract_audio(video_path, audio_path)
 
     log.info(f"飞书妙记处理完成: {base_name}")

@@ -10,11 +10,15 @@ from pathlib import Path
 import requests
 import yaml
 
+from modules.config_utils import load_config
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+PROMPT_DIR = PROJECT_DIR / "prompt"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -26,18 +30,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# 配置加载
-# ---------------------------------------------------------------------------
-
-def load_config():
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
 
 
 def load_custom_dict(config):
@@ -396,10 +388,10 @@ def run_llm_fix(entries, transcript_text, terms, custom_dict, config, creds,
     支持断点续传：cache_path 指定缓存文件，已完成的段会跳过。"""
     # 根据是否有逐字稿选择提示词
     if transcript_text:
-        prompt_file = config.get("s4_fix", {}).get("prompt", "prompt-srtfix-ref.md")
+        prompt_file = config.get("s4_fix", {}).get("prompt", "srtfix-ref.md")
     else:
-        prompt_file = config.get("s4_fix", {}).get("prompt_noref", "prompt-srtfix-noref.md")
-    prompt_path = CFG_DIR / prompt_file
+        prompt_file = config.get("s4_fix", {}).get("prompt_noref", "srtfix-noref.md")
+    prompt_path = PROMPT_DIR / prompt_file
     if not prompt_path.exists():
         raise FileNotFoundError(f"提示词文件不存在: {prompt_path}")
     system_prompt = prompt_path.read_text(encoding="utf-8").strip()
@@ -526,8 +518,9 @@ def main():
     custom_dict = load_custom_dict(config)
 
     # 确定输入文件
-    subtitle_path = args.subtitle or config["s4_input"]["subtitle"]
-    transcript_src = args.transcript or config["s4_input"].get("transcript", "")
+    s4_input = config.get("input", {}).get("s4", {})
+    subtitle_path = args.subtitle or s4_input.get("subtitle", "")
+    transcript_src = args.transcript or s4_input.get("transcript", "")
 
     # 解析字幕（支持多种路径查找）
     srt_path = Path(subtitle_path)
@@ -600,9 +593,9 @@ def main():
         return
 
     # 输出路径准备
-    output_dir = PROJECT_DIR / config["s4_output"]["dir"]
+    output_dir = srt_path.parent
     output_dir.mkdir(exist_ok=True)
-    suffix = config["s4_output"].get("suffix", "_fix")
+    suffix = config.get("output", {}).get("s4", {}).get("suffix", "_fix")
     stem = srt_path.stem
 
     # 第一轮：词典替换

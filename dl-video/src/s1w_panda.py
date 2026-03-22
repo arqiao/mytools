@@ -23,11 +23,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from modules.ffmpeg_utils import extract_audio, concat_ts
+from modules.config_utils import load_config, safe_filename
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -43,7 +47,6 @@ log = logging.getLogger(__name__)
 
 PANDA_API = "https://fclive.pandacollege.cn/api"
 VOD_APPID = 1254019786  # 腾讯云 VOD appId（从 ts URL 路径确认）
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
 
 # 腾讯云 tcplayer 硬编码的 RSA 公钥（用于 SimpleAES DRM overlay 加密）
 RSA_PUB_KEY_B64 = (
@@ -57,35 +60,6 @@ CDN_HEADERS = {
     "Referer": "https://fclive.pandacollege.cn/",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
-
-
-def _find_ffmpeg():
-    """查找 ffmpeg 可执行文件路径"""
-    import shutil
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-    # Windows 常见安装位置
-    for candidate in [r"D:\tools\ffmpeg\bin\ffmpeg.exe",
-                      r"C:\tools\ffmpeg\bin\ffmpeg.exe"]:
-        if Path(candidate).exists():
-            return candidate
-    return "ffmpeg"  # fallback，让 FileNotFoundError 自然抛出
-
-
-FFMPEG = _find_ffmpeg()
-
-
-def safe_filename(title: str) -> str:
-    return ILLEGAL_CHARS.sub("_", title).strip()
-
-
-def load_config():
-    with open(CFG_DIR / "config.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    with open(CFG_DIR / "credentials.yaml", encoding="utf-8") as f:
-        creds = yaml.safe_load(f)
-    return config, creds
 
 
 def extract_short_link(url: str) -> str:
@@ -342,21 +316,8 @@ def download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url,
             ts_path = tmp_dir / f"{i:05d}.ts"
             flist.write(f"file '{ts_path.resolve().as_posix()}'\n")
 
-    cmd = [
-        FFMPEG, "-f", "concat", "-safe", "0",
-        "-i", str(concat_list),
-        "-c", "copy", str(output_path), "-y",
-    ]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=600,
-    )
-    if result.returncode != 0:
-        log.error(f"ffmpeg 合并失败: {result.stderr[-500:]}")
+    if not concat_ts(concat_list, output_path):
         return False
-
-    size_mb = output_path.stat().st_size / 1024 / 1024
-    log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
 
     # 合并成功后才清理临时文件
     import shutil
@@ -364,37 +325,9 @@ def download_drm_video(real_key, hls_iv, sub_m3u8_text, ts_base_url,
     return True
 
 
-def extract_audio(video_path, audio_path):
-    """用 ffmpeg 从视频提取音频为 MP3"""
-    if audio_path.exists():
-        log.info(f"音频已存在，跳过: {audio_path}")
-        return True
-    if not video_path.exists():
-        log.warning(f"视频不存在，无法提取音频: {video_path}")
-        return False
-    log.info(f"提取音频: {audio_path.name}")
-    cmd = [
-        FFMPEG, "-i", str(video_path),
-        "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-        str(audio_path), "-y",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        log.warning("ffmpeg 未安装或不在 PATH 中")
-        return False
-    if result.returncode != 0:
-        log.error(f"ffmpeg 提取音频失败: {result.stderr[-500:]}")
-        return False
-    size_mb = audio_path.stat().st_size / 1024 / 1024
-    log.info(f"音频提取完成: {audio_path} ({size_mb:.1f} MB)")
-    return True
-
-
 def process_panda(task, config, creds):
     """处理熊猫学院回放任务"""
-    source_url = task["source_url"]
+    source_url = task["source_huifang_url"]
     short_link = extract_short_link(source_url)
     log.info(f"处理熊猫学院回放: shortLink={short_link}")
 
@@ -415,10 +348,10 @@ def process_panda(task, config, creds):
         return
 
     # 标题
-    manual_title = task.get("title", "")
+    manual_title = config.get("titleShougong", "") or task.get("title", "")
     title = manual_title or course.get("name", short_link)
     base_name = safe_filename(title)
-    output_dir = PROJECT_DIR / config.get("output_dir", "output")
+    output_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
     output_dir.mkdir(exist_ok=True)
     log.info(f"输出基础名: {base_name}")
 
@@ -474,7 +407,7 @@ def main():
         try:
             process_panda(task, config, creds)
         except Exception:
-            log.exception(f"任务处理失败: {task.get('source_url')}")
+            log.exception(f"任务处理失败: {task.get('source_huifang_url')}")
 
     log.info("所有熊猫学院任务处理完成")
 

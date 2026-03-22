@@ -12,12 +12,18 @@ import time
 from pathlib import Path
 
 import requests
+import yaml
 from playwright.sync_api import sync_playwright
+
+from modules.ffmpeg_utils import extract_audio
+from modules.config_utils import safe_filename
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
-OUTPUT_DIR = PROJECT_DIR / "output"
-LOG_DIR = PROJECT_DIR / "log-err"
+CFG_DIR = PROJECT_DIR / "cfg"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
+OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -30,13 +36,6 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
-
-ILLEGAL_CHARS = re.compile(r'[\\/:*?"<>|：]')
-
-
-def safe_filename(title: str) -> str:
-    """清理文件名中的非法字符"""
-    return ILLEGAL_CHARS.sub("_", title).strip()
 
 
 def parse_date_from_video_url(video_url: str) -> str:
@@ -614,25 +613,10 @@ def download_video(video_url: str, output_path: Path, cookies: dict):
         return False
 
 
-def extract_audio(video_path: Path, audio_path: Path):
-    """从视频中提取音频"""
-    import subprocess
-    cmd = [
-        "ffmpeg", "-i", str(video_path),
-        "-vn", "-acodec", "libmp3lame", "-y",
-        str(audio_path)
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        log.info(f"音频提取完成: {audio_path}")
-    except subprocess.CalledProcessError as e:
-        log.error(f"音频提取失败: {e.stderr.decode('utf-8', errors='ignore')}")
-
-
 def process_tencent_meeting(task: dict, config: dict, creds: dict):
     """处理腾讯会议回放任务"""
-    source_url = task.get("source_url", "")
-    user_title = task.get("title", "")
+    source_url = task.get("source_huifang_url", "")
+    user_title = config.get("titleShougong", "") or task.get("title", "")
 
     log.info(f"开始处理腾讯会议: {source_url}")
 

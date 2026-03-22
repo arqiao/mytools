@@ -9,7 +9,8 @@ import yaml
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-LOG_DIR = PROJECT_DIR / "log-err"
+_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
 LOG_DIR.mkdir(exist_ok=True)
 
 logging.basicConfig(
@@ -37,10 +38,8 @@ def blocks_to_md(copier, blocks_data: dict) -> str:
 
 def feishu_url_to_md(url: str) -> str:
     """从飞书/一堂 URL 获取文档内容，返回 markdown 文本。
-    复用 yitang_wiki.py 的 YitangCopier。"""
-    import sys
-    sys.path.insert(0, str(SCRIPT_DIR))
-    from yitang_wiki import YitangCopier
+    复用 s1w_yitang_wiki.py 的 YitangCopier。"""
+    from s2w_yitang_wiki import YitangCopier
 
     copier = YitangCopier()
 
@@ -56,18 +55,12 @@ def feishu_url_to_md(url: str) -> str:
     return blocks_to_md(copier, blocks_data)
 
 
-def url_to_filename(url: str) -> str:
-    """从飞书 URL 提取 token 作为默认文件名"""
-    token = url.rstrip("/").split("/")[-1].split("?")[0]
-    return f"{token}.md"
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="飞书文档 URL → 本地 Markdown 文件")
     parser.add_argument("url", help="飞书文档 URL")
-    parser.add_argument("-o", "--output", default="",
-                        help="输出文件路径（默认保存到 localscript/）")
+    parser.add_argument("-o", "--output", required=True,
+                        help="输出文件路径")
     args = parser.parse_args()
 
     url = args.url
@@ -79,12 +72,7 @@ def main():
     md_text = feishu_url_to_md(url)
     log.info(f"文档内容: {len(md_text)} 字符")
 
-    if args.output:
-        out_path = Path(args.output)
-    else:
-        out_dir = PROJECT_DIR / "localscript"
-        out_dir.mkdir(exist_ok=True)
-        out_path = out_dir / url_to_filename(url)
+    out_path = Path(args.output)
 
     out_path.write_text(md_text, encoding="utf-8")
     log.info(f"已保存: {out_path}")
