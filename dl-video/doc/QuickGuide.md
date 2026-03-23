@@ -29,7 +29,7 @@ python src/run_pipeline.py
 python src/s1_huifang.py
 ```
 
-读取 input.yaml 中所有 task，按 `source_type` 分发到对应平台模块。
+读取 input.yaml 中所有 task，按 `source_type` 分发到对应平台模块。支持 URL 自动识别：未指定 `source_type` 时，根据 URL 模式自动推断平台类型。
 输入：`cfg/input.yaml` + `cfg/credentials.yaml`
 输出：`output/{title}.ts` 或 `.mp4` + `.mp3`（飞书妙记额外产出 `_ori.srt`、`_ori.md`）
 
@@ -76,7 +76,12 @@ python src/s2w_yitang_wiki.py [--dry-run]
 
 ### s1w_feishumiaoji.py — 飞书妙记
 
-由 s1_huifang.py 调度（`source_type: "feishu_minutes"`），不单独运行。
+```bash
+python src/s1w_feishumiaoji.py
+```
+
+由 s1_huifang.py 调度（`source_type: "feishu_minutes"`），也可单独运行。
+自动提取创建日期作为文件名前缀（如 `260312-标题`）。
 
 input.yaml 示例：
 ```yaml
@@ -88,13 +93,17 @@ tasks:
 ```
 
 凭证：`feishu.browser_cookie`（必需）+ `feishu.user_access_token`（自动刷新）
-输出：`output/{title}.ts` + `.mp3` + `_ori.srt` + `_ori.md`
+输出：`output/{date_prefix}{title}.ts` + `.mp3` + `_ori.srt` + `_ori.md`
 
 ---
 
 ### s1w_tencentmeeting.py — 腾讯会议
 
-由 s1_huifang.py 调度（`source_type: "tencent_meeting"`），不单独运行。需要 Playwright。
+```bash
+python src/s1w_tencentmeeting.py
+```
+
+由 s1_huifang.py 调度（`source_type: "tencent_meeting"`），也可单独运行。需要 Playwright。
 
 input.yaml 示例：
 ```yaml
@@ -217,6 +226,7 @@ python src/s3_subtitle.py
 ```
 
 当 s1 未产出 `_ori.srt` 时，用 Whisper 从 MP3 生成字幕。已有 `_ori.srt` 则跳过。
+支持长音频断点续转：中断后重新运行时自动从上次完成的段落继续。
 输入：`output/{title}.mp3`
 输出：`output/{title}_wm.srt`
 配置：`config.yaml` 中 `s3_engine_suffix`

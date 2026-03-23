@@ -143,7 +143,7 @@ def get_task_title(task, config, creds):
         session = requests.Session()
         token = extract_minutes_token(task["source_huifang_url"])
         user_token = ensure_feishu_token(creds, session)
-        title, _ = get_minutes_info(token, user_token, session)
+        title, _, _ = get_minutes_info(token, user_token, session)
         return title
 
     return "untitled"

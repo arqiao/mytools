@@ -21,7 +21,7 @@ import requests
 import yaml
 
 from modules.ffmpeg_utils import FFMPEG, extract_audio, download_hls, remux_ts_to_mp4
-from modules.config_utils import load_config, safe_filename
+from modules.config_utils import load_config, safe_filename, strip_date_from_title
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -330,7 +330,8 @@ def process_xiaoe(task, config, creds):
         fid_match = re.search(r'fileId=(\d+)', m3u8_text)
         title = f"xiaoe_{fid_match.group(1)}" if fid_match else "xiaoe_video"
         log.warning(f"标题为空，使用默认名: {title}")
-    base_name = f"{date_prefix}-{safe_filename(title)}"
+    clean_title = safe_filename(strip_date_from_title(title, date_prefix)) if date_prefix else safe_filename(title)
+    base_name = f"{date_prefix}-{clean_title}" if date_prefix else clean_title
     video_path = OUTPUT_DIR / f"{base_name}.mp4"
 
     # 4. 下载视频：有 AES 加密则手动解密，否则 ffmpeg 直接下载
@@ -349,3 +350,25 @@ def process_xiaoe(task, config, creds):
     # 5. 提取音频
     extract_audio(video_path, OUTPUT_DIR / f"{base_name}.mp3")
     log.info(f"小鹅通视频处理完成: {base_name}")
+
+
+def main():
+    config, creds = load_config()
+    tasks = config.get("tasks", [])
+    xe_tasks = [t for t in tasks if t.get("source_type") == "xiaoe"]
+    if not xe_tasks:
+        log.warning("input.yaml 中无 xiaoe 类型任务")
+        return
+
+    for i, task in enumerate(xe_tasks):
+        log.info(f"=== 小鹅通任务 {i+1}/{len(xe_tasks)} ===")
+        try:
+            process_xiaoe(task, config, creds)
+        except Exception:
+            log.exception(f"任务处理失败: {task.get('source_huifang_url')}")
+
+    log.info("所有小鹅通任务处理完成")
+
+
+if __name__ == "__main__":
+    main()

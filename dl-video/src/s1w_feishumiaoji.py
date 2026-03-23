@@ -7,6 +7,8 @@
 
 import logging
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -15,7 +17,7 @@ import yaml
 from modules.feishu_token import FEISHU_BASE, ensure_feishu_token
 from modules.feishu_minutes import extract_minutes_token, get_minutes_info
 from modules.ffmpeg_utils import extract_audio
-from modules.config_utils import safe_filename
+from modules.config_utils import safe_filename, load_config, strip_date_from_title
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -38,7 +40,10 @@ log = logging.getLogger(__name__)
 
 
 def get_minutes_media(token, cookie, session, source_url):
-    """从妙记页面 HTML 解析标题、视频/音频 URL（SSR 数据）"""
+    """从妙记页面 HTML 解析标题、视频/音频 URL、创建时间（SSR 数据）
+
+    返回 (title, video_url, vtt_url, create_time)，create_time 为秒级时间戳字符串。
+    """
     m = re.match(r"(https://[^/]+)", source_url)
     base_domain = m.group(1) if m else "https://waytoagi.feishu.cn"
 
@@ -50,7 +55,7 @@ def get_minutes_media(token, cookie, session, source_url):
     resp = session.get(page_url, headers=headers, timeout=30)
     if resp.status_code != 200:
         log.warning(f"妙记页面请求失败: status={resp.status_code}")
-        return None, None, None
+        return None, None, None, ""
 
     def decode_unicode_escapes(text):
         return re.sub(
@@ -63,6 +68,7 @@ def get_minutes_media(token, cookie, session, source_url):
     video_url = ""
     vtt_url = ""
     title = ""
+    create_time = ""
 
     vm = re.search(r'"video_url":"([^"]+)"', decoded)
     if vm:
@@ -78,10 +84,16 @@ def get_minutes_media(token, cookie, session, source_url):
         if title_match:
             title = title_match.group(1).replace(" - 飞书妙记", "").strip()
 
+    # 提取创建时间（毫秒或秒级时间戳）
+    ct = re.search(r'"(?:start_time|create_time|startTime)"\s*:\s*"?(\d{10,13})"?', decoded)
+    if ct:
+        create_time = ct.group(1)
+
     log.info(f"页面标题: {title}")
     log.info(f"video_url: {'有' if video_url else '无'}, "
-             f"vtt_url: {'有' if vtt_url else '无'}")
-    return title, video_url, vtt_url
+             f"vtt_url: {'有' if vtt_url else '无'}, "
+             f"create_time: {create_time or '无'}")
+    return title, video_url, vtt_url, create_time
 
 
 def download_video(video_url, output_path, cookie):
@@ -119,13 +131,26 @@ def download_video(video_url, output_path, cookie):
     mode = "ab" if resp.status_code == 206 else "wb"
 
     with open(output_path, mode) as f:
+        last_reported = downloaded // (5 * 1024 * 1024)
         for chunk in resp.iter_content(chunk_size=65536):
             f.write(chunk)
             downloaded += len(chunk)
-            if total > 0 and downloaded % (5 * 1024 * 1024) < 65536:
-                log.info(f"  下载进度: {downloaded / 1024 / 1024:.1f} / "
-                         f"{total / 1024 / 1024:.1f} MB")
-    size_mb = output_path.stat().st_size / 1024 / 1024
+            cur_block = downloaded // (5 * 1024 * 1024)
+            if total > 0 and cur_block > last_reported:
+                last_reported = cur_block
+                pct = int(downloaded * 100 / total)
+                print(f"\r  下载进度: {pct}% ({downloaded / 1024 / 1024:.1f} / "
+                      f"{total / 1024 / 1024:.1f} MB)", end="", flush=True)
+    if total > 0:
+        print(f"\r  下载进度: 100% ({total / 1024 / 1024:.1f} / "
+              f"{total / 1024 / 1024:.1f} MB)")
+
+    # 校验下载完整性
+    actual_size = output_path.stat().st_size
+    if total > 0 and actual_size < total:
+        log.warning(f"视频下载不完整: {actual_size}/{total} 字节，下次运行将续传")
+        return False
+    size_mb = actual_size / 1024 / 1024
     log.info(f"视频下载完成: {output_path} ({size_mb:.1f} MB)")
     return True
 
@@ -288,6 +313,17 @@ def _save_transcript(paragraphs, output_dir, base_name, source=""):
     return True
 
 
+def _ts_to_date_prefix(ts_str: str) -> str:
+    """将时间戳字符串转为日期前缀，如 '1741766400' → '260312'"""
+    if not ts_str:
+        return ""
+    ts = int(ts_str)
+    if ts > 1e12:  # 毫秒级
+        ts = ts // 1000
+    dt = datetime.fromtimestamp(ts)
+    return dt.strftime("%y%m%d")
+
+
 def process_feishu_minutes(task, config, creds):
     """处理飞书妙记任务（入口）"""
     session = requests.Session()
@@ -297,7 +333,7 @@ def process_feishu_minutes(task, config, creds):
 
     cookie = creds["feishu"].get("browser_cookie", "")
 
-    page_title, video_url, vtt_url = get_minutes_media(
+    page_title, video_url, vtt_url, create_time = get_minutes_media(
         token, cookie, session, source_url
     )
 
@@ -310,12 +346,22 @@ def process_feishu_minutes(task, config, creds):
     else:
         try:
             user_token = ensure_feishu_token(creds, session)
-            title, duration = get_minutes_info(token, user_token, session)
+            title, duration, api_create_time = get_minutes_info(token, user_token, session)
+            if not create_time and api_create_time:
+                create_time = api_create_time
         except Exception as e:
             log.warning(f"Open API 获取标题失败: {e}")
             title = token
 
     base_name = safe_filename(title)
+
+    # 添加日期前缀
+    date_prefix = _ts_to_date_prefix(create_time)
+    if date_prefix:
+        base_name = safe_filename(strip_date_from_title(title, date_prefix))
+        base_name = f"{date_prefix}-{base_name}"
+        log.info(f"添加日期前缀: {date_prefix}")
+
     output_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
     output_dir.mkdir(exist_ok=True)
 
@@ -346,3 +392,25 @@ def process_feishu_minutes(task, config, creds):
     extract_audio(video_path, audio_path)
 
     log.info(f"飞书妙记处理完成: {base_name}")
+
+
+def main():
+    config, creds = load_config()
+    tasks = config.get("tasks", [])
+    fm_tasks = [t for t in tasks if t.get("source_type") == "feishu_minutes"]
+    if not fm_tasks:
+        log.warning("input.yaml 中无 feishu_minutes 类型任务")
+        return
+
+    for i, task in enumerate(fm_tasks):
+        log.info(f"=== 飞书妙记任务 {i+1}/{len(fm_tasks)} ===")
+        try:
+            process_feishu_minutes(task, config, creds)
+        except Exception:
+            log.exception(f"任务处理失败: {task.get('source_huifang_url')}")
+
+    log.info("所有飞书妙记任务处理完成")
+
+
+if __name__ == "__main__":
+    main()

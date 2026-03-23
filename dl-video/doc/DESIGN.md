@@ -71,8 +71,8 @@ dl-video/
 │   ├── url2md.py            # 飞书 wiki 转 markdown 工具
 │   ├── modules/             # 公共模块
 │   │   ├── __init__.py
-│   │   ├── ffmpeg_utils.py  # ffmpeg 工具（音频提取、HLS 下载、TS 合并、音频转换）
-│   │   ├── config_utils.py  # 配置加载（load_config、safe_filename）
+│   │   ├── ffmpeg_utils.py  # ffmpeg 工具（音频提取、HLS 下载、TS 合并、音频转换；临时文件保护 + 进度显示）
+│   │   ├── config_utils.py  # 配置加载（load_config、safe_filename、strip_date_from_title）
 │   │   ├── feishu_auth.py   # 飞书 OAuth 授权工具
 │   │   ├── feishu_token.py  # 飞书 token 统一管理（刷新、请求头、wiki 解析）
 │   │   └── feishu_minutes.py # 飞书妙记公共工具（URL 解析、妙记信息查询）
@@ -107,9 +107,27 @@ dl-video/
 - 提升用户体验：文本数据秒级返回，用户可快速确认任务是否正常
 - 节省带宽：避免下载几百MB视频后才发现标题或字幕获取失败
 
+**断点续传与文件完整性保护**：
+
+所有平台模块遵循统一的文件保护策略：
+1. **视频下载断点续传**：飞书妙记、腾讯会议、知乎训练营支持 HTTP Range 续传，下载完成后校验文件大小
+2. **临时文件保护**：ffmpeg 所有操作（音频提取、HLS 下载、TS 合并、格式转换）先写临时文件（`.tmp.mp3`、`.tmp.mp4` 等），成功后再 rename，避免中断后留下不完整文件
+3. **已完成跳过**：所有函数在执行前检查输出文件是否已存在且大小 > 1024 字节，已完成则跳过
+
+**进度显示**：
+
+所有下载和转换操作提供实时进度反馈：
+- 视频/音频下载：每 5MB 更新一次，使用 `\r` 同行刷新
+- 音频转换（ffmpeg）：每 1 分钟更新一次，通过 `-progress pipe:1` 解析 `out_time_ms`
+- 完成时保证输出 100%
+
 ### Step1 调度器 (s1_huifang.py)
 
 读取 `input.yaml` 中的 `tasks` 列表，根据每个任务的 `source_type` 字段分发到对应平台模块。支持的 source_type：`yitang`、`feishu_minutes`、`tencent_meeting`、`zhihu`、`xiaoe`、`panda`、`taobao`。
+
+**URL 自动识别**：未指定 `source_type` 时，调度器根据 `source_huifang_url` 的 URL 模式自动推断平台类型。source_type 优先（显式指定时直接使用），URL 推断作为 fallback。每个任务独立 try/except，单任务失败不影响后续任务。
+
+**各平台模块独立运行**：所有 `s1w_*.py` 模块均有 `main()` 入口，可直接 `python src/s1w_xxx.py` 运行，自动从 input.yaml 筛选对应 source_type 的任务。
 
 ### 一堂 (s1w_yitang_video.py)
 
@@ -167,8 +185,9 @@ dl-video/
    - `video_url` — 视频流地址（飞书内部 CDN）
    - `web_vtt_url` — WebVTT 字幕地址
    - `topic` — 标题（fallback 到 `<title>` 标签）
+   - `create_time` — 创建时间戳（从 SSR 数据中提取 `start_time`/`create_time`）
    - 关键：页面 HTML 中含 `\uXXXX` 转义，需先 `decode_unicode_escapes()` 再正则提取
-3. `download_video(video_url, output_path, cookie)` — 流式下载视频，支持 HTTP Range 断点续传
+3. `download_video(video_url, output_path, cookie)` — 流式下载视频，支持 HTTP Range 断点续传，下载完成后校验文件大小
 4. `extract_audio_from_video()` — ffmpeg 提取 MP3（`-vn -acodec libmp3lame -q:a 2`）
 5. `download_vtt_subtitle()` → `vtt_to_srt()` — 下载 WebVTT 并转换为 SRT 格式
 6. `get_transcript()` — Open API `/minutes/v1/minutes/{token}/transcript` 获取文字记录
@@ -186,11 +205,16 @@ dl-video/
 | **字幕URL** | 页面HTML解析（SSR JSON） | WebVTT格式字幕地址，嵌在SSR数据中 | minutes_token + cookie |
 | **文字记录** | Open API或Cookie API | Open API需user_access_token，跨租户时用Cookie API | minutes_token + (user_access_token 或 cookie) |
 
+**文件名生成**：
+- 自动从 `create_time` 提取日期前缀（如 `260312-`），通过 `_ts_to_date_prefix()` 转换
+- 使用 `strip_date_from_title()` 去除标题中已有的日期信息，避免重复（如 `260313-03-13 标题`）
+- 支持多种日期格式去重：YYMMDD、YYYYMMDD、YYYY-MM-DD、M月D日 等
+
 **输出文件**：
-- `{title}.ts` — 视频文件
-- `{title}.mp3` — 音频文件
-- `{title}_ori.srt` — 原始字幕（VTT 转 SRT，或 transcript 生成）
-- `{title}_ori.md` — 文字记录（带说话人标注）
+- `{date_prefix}{title}.ts` — 视频文件
+- `{date_prefix}{title}.mp3` — 音频文件
+- `{date_prefix}{title}_ori.srt` — 原始字幕（VTT 转 SRT，或 transcript 生成）
+- `{date_prefix}{title}_ori.md` — 文字记录（带说话人标注）
 
 **踩坑记录**：
 - 飞书妙记页面的视频/字幕 URL 嵌在 SSR 渲染的 JSON 中，含 `\uXXXX` Unicode 转义，直接正则匹配会失败，必须先解码
@@ -520,6 +544,12 @@ dl-video/
 **输出**：`output/{title}_wm.srt`（Whisper 生成的字幕）
 **跳过条件**：如果 `output/{title}_ori.srt` 已存在（s1 已获取到字幕），则跳过
 
+**长音频断点续转**：
+- 长音频按 30 分钟分段转写，每段完成后 `flush()` 落盘
+- 中断后重新运行时，解析已有 srt 文件的最后一条字幕的结束时间和序号
+- 根据结束时间反算已完成的段号，从下一段继续，srt 序号连续
+- 每段转写后执行 `gc.collect()` + `torch.cuda.empty_cache()` 释放显存，缓解 CUDA OOM
+
 **配置参数**（config.yaml）：
 ```yaml
 whisper:
@@ -751,9 +781,17 @@ minimax:
               fix: 一堂讨论区 XLSX 导出过滤 XML 非法控制字符
               improve: 一堂/飞书妙记执行顺序调整为"文本优先，大文件最后"
               cleanup: _detect_url_type() 去掉 "fs" 兜底，未知类型给 warning
+03-23~24      feat: s1w 平台模块全部支持独立运行（main() 入口）
+              feat: s1_huifang 调度器支持 URL 自动识别（source_type 优先，URL fallback）
+              improve: 视频/音频下载断点续传（HTTP Range）+ 文件完整性校验
+              improve: ffmpeg 全操作临时文件保护（写 .tmp → rename）
+              improve: 飞书妙记文件名添加日期前缀 + strip_date_from_title 去重
+              improve: 进度显示优化（5MB/1min 间隔 + 同行刷新 + 100% 保证）
+              feat: Whisper 长音频断点续转（srt 解析 + 段落跳过 + flush 落盘）
+              fix: ffmpeg extract_audio stderr 管道死锁（改为临时文件）
 ```
 
-6 天内完成：7 个平台接入、5 步流水线独立化、3 轮架构重构。节奏很快，但每一步都有明确的驱动力（下文逐一展开）。
+6 天内完成：7 个平台接入、5 步流水线独立化、3 轮架构重构。后续 2 天完成：断点续传/续转、文件完整性保护、进度显示、模块独立运行等健壮性改进。
 
 ### 一、架构演进：从 yitang 寄生到独立项目
 
@@ -949,7 +987,30 @@ minimax:
   ```
 - 修改日志目录只需改一处配置
 
-### 十二、踩坑备忘
+### 十二、健壮性改进：断点续传/续转 + 文件保护 + 进度显示
+
+**背景**：10 小时音频转写到第 209/220 段时 CUDA OOM 崩溃，前 208 段结果全部丢失。视频下载中断后留下不完整文件，下次运行误判为已完成。长时间操作无进度反馈，用户无法判断是否卡死。
+
+**三个层面的改进**：
+
+1. **Whisper 断点续转**：
+   - 每段转写完成后 `flush()` 落盘，崩溃时已完成段落不丢失
+   - 重新运行时解析已有 srt 的最后一条字幕，反算已完成段号，从下一段继续
+   - 每段后 `gc.collect()` + `torch.cuda.empty_cache()` 释放显存
+
+2. **文件完整性保护**：
+   - ffmpeg 所有操作使用临时文件（`.tmp.mp3`、`.tmp.mp4` 等），成功后 `Path.replace()` 原子替换
+   - 视频下载完成后校验 `actual_size` vs `content-length`，不完整时标记续传
+   - 所有函数检查输出文件 `exists() and st_size > 1024` 才视为已完成
+
+3. **进度显示**：
+   - 下载进度：5MB 间隔，`\r` 同行刷新，显示百分比和 MB 数
+   - 音频转换：1 分钟间隔，ffmpeg `-progress pipe:1` 解析 `out_time_ms`
+   - 完成时保证输出 100%（避免最后一次更新停在 99%）
+
+**ffmpeg stderr 死锁修复**：`extract_audio()` 使用 `Popen` + `stdout=PIPE` 读取进度时，如果 stderr 也用 PIPE，长音频（165 分钟）的大量 stderr 输出会填满 64KB 管道缓冲区，导致 ffmpeg 写入阻塞 → 死锁。改为将 stderr 重定向到临时文件。
+
+### 十三、踩坑备忘
 
 **credentials 冲突**（8dde827）：dl-video 和 yitang 共享同一个 `credentials.yaml` 时，两边都会刷新飞书 token 并写回文件。A 刷新后 B 读到旧的 refresh_token 再刷新就会失败（refresh_token 是一次性的）。解决方案：独立化后各自维护自己的 credentials。
 
@@ -968,3 +1029,11 @@ minimax:
 **淘宝直播 linkCode 双格式**：URL 中的 linkCode 有带 `c` 前缀和不带两种格式，API 端两种都可能有效。代码自动尝试两种，先试原始值，失败后去掉 `c` 前缀重试。
 
 **视频下载断点续传的局限**：飞书妙记的视频 CDN 不一定支持 HTTP Range。`download_video()` 检测到 status_code==200（而非 206）时放弃续传，从头下载。熊猫学院的分片下载则通过临时目录实现续传——已解密的分片保留在 `_tmp_{stem}/` 中，中断后重新运行跳过已有分片。
+
+**ffmpeg stderr 管道死锁**：`extract_audio()` 使用 `subprocess.Popen` 时，如果 stderr 用 `PIPE` 且 ffmpeg 输出大量警告（如 165 分钟音频），stderr 管道缓冲区（64KB）会满，导致 ffmpeg 写入阻塞，而主进程在读 stdout 等待 ffmpeg 结束，形成死锁。解决方案：将 stderr 重定向到临时文件而非 PIPE。
+
+**ffmpeg 临时文件命名**：临时文件后缀必须让 ffmpeg 能识别输出格式。`.mp3.tmp` 会导致 "Unable to choose output format" 错误，应使用 `.tmp.mp3`。对于 HLS 下载和 TS 合并，使用 `with_stem()` 方式（如 `output.tmp.mp4`）。
+
+**Whisper CUDA OOM 与模型重建**：10 小时音频分 220 段转写时，第 209 段 CUDA OOM。尝试每 50 段重建模型（`del model` + `gc.collect()` + `torch.cuda.empty_cache()` + 重新 `WhisperModel()`），但 CTranslate2 在重建时会静默崩溃（进程直接退出无报错）。最终方案：放弃模型重建，仅做轻量级显存清理 + 断点续转支持。
+
+**飞书妙记文件名日期去重**：标题中可能已包含日期（如 "03-13 | 第五期..."），加上日期前缀后变成 `260313-03-13 | 第五期...`。`strip_date_from_title()` 需支持多种日期格式（YYMMDD、YYYY-MM-DD、M月D日 等），且只去除与 date_prefix 匹配的日期，避免误删标题中的其他数字。

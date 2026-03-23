@@ -317,16 +317,19 @@ class YitangLiveDownloader:
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0)) + downloaded
             with open(mp3_path, mode) as f:
+                last_reported = downloaded // (5 * 1024 * 1024)
                 for chunk in resp.iter_content(chunk_size=1024 * 256):
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if total:
+                    cur_block = downloaded // (5 * 1024 * 1024)
+                    if total and cur_block > last_reported:
+                        last_reported = cur_block
                         pct = downloaded * 100 // total
-                        mb = downloaded / 1024 / 1024
-                        total_mb = total / 1024 / 1024
-                        print(f"\r  音频下载: {mb:.1f}/{total_mb:.1f} MB ({pct}%)", end="", flush=True)
+                        print(f"\r  音频下载: {pct}% ({downloaded / 1024 / 1024:.1f} / "
+                              f"{total / 1024 / 1024:.1f} MB)", end="", flush=True)
             if total:
-                print()
+                print(f"\r  音频下载: 100% ({total / 1024 / 1024:.1f} / "
+                      f"{total / 1024 / 1024:.1f} MB)")
             log.info(f"音频下载成功: {mp3_path}")
             return mp3_path
         except Exception as e:

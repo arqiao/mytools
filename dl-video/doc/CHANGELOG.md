@@ -4,6 +4,44 @@
 
 ## 2026-03
 
+### fix: ffmpeg 长音频提取死锁修复
+- `extract_audio()` 将 stderr 从 `subprocess.PIPE` 改为重定向到临时文件
+- 修复 165 分钟以上音频提取时 stderr 管道缓冲区溢出导致进程卡死的问题
+- 临时 stderr 文件仅在失败时读取用于错误报告，成功后自动清理
+
+### improve: 进度显示优化 — 统一间隔 + 同行更新 + 100% 保证
+- 视频/音频下载进度改为 5MB 间隔更新，使用 `\r` 同行刷新
+- 音频转换进度改为 1 分钟间隔更新，使用 ffmpeg `-progress pipe:1` 解析
+- 所有进度显示在完成时保证输出 100%
+
+### improve: 飞书妙记文件名添加日期前缀 + 日期去重
+- 从妙记页面 SSR 数据提取 `create_time` 时间戳，转为 `YYMMDD-` 前缀
+- 新增 `strip_date_from_title()` 去除标题中已有的日期信息，避免 `260313-03-13` 重复
+- 支持多种日期格式：YYMMDD、YYYYMMDD、YYYY-MM-DD、M月D日 等
+
+### improve: 文件完整性保护 — 全面临时文件机制
+- ffmpeg_utils 所有函数（extract_audio、download_hls、remux_ts_to_mp4、concat_ts、mp3_to_wav、mp3_to_pcm）改为先写临时文件，成功后再 rename
+- 避免中断后留下不完整的输出文件，下次运行时误判为已完成
+
+### improve: 视频/音频下载断点续传
+- 飞书妙记、腾讯会议、知乎训练营的视频下载支持 HTTP Range 续传
+- 下载完成后校验文件大小，不完整时标记为续传状态
+- 服务器不支持 Range 时自动从头下载
+
+### feat: s1w 平台模块支持独立运行
+- 飞书妙记、腾讯会议、知乎、小鹅通、淘宝直播模块均添加 `main()` 入口
+- 独立运行时自动从 input.yaml 筛选对应 source_type 的任务
+
+### feat: s1_huifang.py 调度器支持 URL 自动识别
+- 新增 `_infer_source_type()` 函数，根据 URL 模式自动推断平台类型
+- source_type 优先（显式指定时直接使用），URL 推断作为 fallback
+- 每个任务独立 try/except，单任务失败不影响后续任务
+
+### feat: Whisper 长音频转写断点续转
+- 转写中断后重新运行时，解析已有 srt 文件的最后一条字幕，从断点继续
+- 每段转写完成后 `flush()` 落盘，CUDA OOM 崩溃时已完成段落不丢失
+- 每段转写后执行 `gc.collect()` + `torch.cuda.empty_cache()` 释放显存
+
 ### refactor: 新建 src/modules/ 公共模块包，消除跨文件重复代码
 - 新建 `src/modules/` 目录（含 `__init__.py`）
 - `ffmpeg_utils.py`：统一 ffmpeg 调用 — find_ffmpeg、extract_audio、download_hls、remux_ts_to_mp4、concat_ts、mp3_to_wav、mp3_to_pcm，消除 6+ 个文件中的重复 ffmpeg 代码

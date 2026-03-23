@@ -174,3 +174,25 @@ def process_taobao(task, config, creds):
     extract_audio(video_path, audio_path)
 
     log.info(f"淘宝直播处理完成: {base_name}")
+
+
+def main():
+    config, creds = load_config()
+    tasks = config.get("tasks", [])
+    tb_tasks = [t for t in tasks if t.get("source_type") == "taobao"]
+    if not tb_tasks:
+        log.warning("input.yaml 中无 taobao 类型任务")
+        return
+
+    for i, task in enumerate(tb_tasks):
+        log.info(f"=== 淘宝直播任务 {i+1}/{len(tb_tasks)} ===")
+        try:
+            process_taobao(task, config, creds)
+        except Exception:
+            log.exception(f"任务处理失败: {task.get('source_huifang_url')}")
+
+    log.info("所有淘宝直播任务处理完成")
+
+
+if __name__ == "__main__":
+    main()

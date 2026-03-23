@@ -18,7 +18,7 @@ import requests
 import yaml
 
 from modules.ffmpeg_utils import extract_audio, download_hls
-from modules.config_utils import load_config, safe_filename
+from modules.config_utils import load_config, safe_filename, strip_date_from_title
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -415,42 +415,64 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
 
 
 def download_mp4_direct(mp4_url: str, referer: str, output_path: Path) -> bool:
-    """直接下载 MP4 视频"""
-    if output_path.exists() and output_path.stat().st_size > 1024:
-        log.info(f"视频已存在，跳过: {output_path}")
-        return True
-    log.info(f"直接下载 MP4: {output_path.name}")
-
+    """直接下载 MP4 视频，支持断点续传"""
     headers = {
         "Referer": referer,
         "Origin": "https://www.zhihu.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Range": "bytes=0-",
     }
 
     try:
-        # 先发送 HEAD 请求获取文件大小
-        resp = requests.head(mp4_url, headers=headers, timeout=15, allow_redirects=True)
-        content_length = resp.headers.get("Content-Length", "0")
-        total_size = int(content_length) if content_length.isdigit() else 0
-        log.info(f"视频大小: {total_size / 1024 / 1024:.1f} MB" if total_size else "大小未知")
+        existing_size = output_path.stat().st_size if output_path.exists() else 0
 
-        # 分片下载（知乎视频通常较大）
-        chunk_size = 1024 * 1024  # 1MB
+        # 检查是否已下载完成
+        if existing_size > 0:
+            head_resp = requests.head(mp4_url, headers=headers, timeout=15, allow_redirects=True)
+            total = int(head_resp.headers.get("Content-Length", 0))
+            if total > 0 and existing_size >= total:
+                log.info(f"视频已下载完成，跳过: {output_path}")
+                return True
+            log.info(f"续传: 已有 {existing_size / 1024 / 1024:.1f} / "
+                     f"{total / 1024 / 1024:.1f} MB")
+
+        log.info(f"直接下载 MP4: {output_path.name}")
+        if existing_size > 0:
+            headers["Range"] = f"bytes={existing_size}-"
+
         with requests.get(mp4_url, headers=headers, stream=True, timeout=60) as r:
             r.raise_for_status()
-            with open(output_path, "wb") as f:
-                downloaded = 0
-                for chunk in r.iter_content(chunk_size=chunk_size):
+
+            # 服务器不支持 Range 时回退从头下载
+            if r.status_code == 200 and existing_size > 0:
+                log.info("服务器不支持 Range，从头下载")
+                existing_size = 0
+
+            total_size = existing_size + int(r.headers.get("Content-Length", 0))
+            downloaded = existing_size
+            mode = "ab" if r.status_code == 206 else "wb"
+
+            with open(output_path, mode) as f:
+                last_reported = downloaded // (5 * 1024 * 1024)
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
                         downloaded += len(chunk)
-                        if total_size:
-                            pct = downloaded * 100 / total_size
-                            if downloaded % (10 * 1024 * 1024) == 0 or downloaded == total_size:
-                                log.info(f"  下载进度: {downloaded / 1024 / 1024:.1f} MB / {total_size / 1024 / 1024:.1f} MB ({pct:.1f}%)")
+                        cur_block = downloaded // (5 * 1024 * 1024)
+                        if total_size and cur_block > last_reported:
+                            last_reported = cur_block
+                            pct = int(downloaded * 100 / total_size)
+                            print(f"\r  下载进度: {pct}% ({downloaded / 1024 / 1024:.1f} / "
+                                  f"{total_size / 1024 / 1024:.1f} MB)", end="", flush=True)
+            if total_size > 0:
+                print(f"\r  下载进度: 100% ({total_size / 1024 / 1024:.1f} / "
+                      f"{total_size / 1024 / 1024:.1f} MB)")
 
-        size_mb = output_path.stat().st_size / 1024 / 1024
+        # 校验下载完整性
+        actual_size = output_path.stat().st_size
+        if total_size > 0 and actual_size < total_size:
+            log.warning(f"视频下载不完整: {actual_size}/{total_size} 字节，下次运行将续传")
+            return False
+        size_mb = actual_size / 1024 / 1024
         log.info(f"MP4 下载完成: {output_path} ({size_mb:.1f} MB)")
         return True
     except Exception as e:
@@ -500,6 +522,7 @@ def process_zhihu(task, config, creds):
 
     base_name = safe_filename(title)
     if publish_date:
+        base_name = safe_filename(strip_date_from_title(title, publish_date))
         base_name = f"{publish_date}-{base_name}"
         log.info(f"添加日期前缀: {publish_date}")
     video_path = OUTPUT_DIR / f"{base_name}.mp4"

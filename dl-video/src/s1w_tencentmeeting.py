@@ -16,7 +16,7 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from modules.ffmpeg_utils import extract_audio
-from modules.config_utils import safe_filename
+from modules.config_utils import safe_filename, load_config, strip_date_from_title
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -579,35 +579,62 @@ def generate_abs_md(summary: str, timeline: list) -> str:
 
 
 def download_video(video_url: str, output_path: Path, cookies: dict):
-    """下载视频文件"""
+    """下载视频文件，支持断点续传"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://meeting.tencent.com/'
     }
     try:
+        existing_size = output_path.stat().st_size if output_path.exists() else 0
+
+        # 检查是否已下载完成
+        if existing_size > 0:
+            head_resp = requests.head(video_url, headers=headers, cookies=cookies, timeout=15)
+            total = int(head_resp.headers.get("content-length", 0))
+            if total > 0 and existing_size >= total:
+                log.info(f"视频已下载完成，跳过: {output_path}")
+                return True
+            log.info(f"续传: 已有 {existing_size / 1024 / 1024:.1f} / "
+                     f"{total / 1024 / 1024:.1f} MB")
+
         log.info(f"开始下载: {output_path.name}")
+        if existing_size > 0:
+            headers["Range"] = f"bytes={existing_size}-"
+
         resp = requests.get(video_url, headers=headers, cookies=cookies, stream=True, timeout=60)
-        if resp.status_code == 200:
-            total = int(resp.headers.get('content-length', 0))
-            with open(output_path, 'wb') as f:
-                downloaded = 0
-                last_time = time.time()
-                for chunk in resp.iter_content(chunk_size=1024*1024):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total > 0:
-                        current_time = time.time()
-                        # 每2秒输出一次进度
-                        if current_time - last_time >= 2:
-                            percent = int(downloaded/total*100)
-                            print(f"\r下载进度: {percent}%", end='', flush=True)
-                            last_time = current_time
-            print()  # 换行
-            log.info(f"下载完成: {output_path}")
-            return True
-        else:
-            log.warning(f"下载失败: HTTP {resp.status_code}")
+        resp.raise_for_status()
+
+        # 服务器不支持 Range 时回退从头下载
+        if resp.status_code == 200 and existing_size > 0:
+            log.info("服务器不支持 Range，从头下载")
+            existing_size = 0
+
+        total = existing_size + int(resp.headers.get("content-length", 0))
+        downloaded = existing_size
+        mode = "ab" if resp.status_code == 206 else "wb"
+
+        with open(output_path, mode) as f:
+            last_reported = downloaded // (5 * 1024 * 1024)
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                f.write(chunk)
+                downloaded += len(chunk)
+                cur_block = downloaded // (5 * 1024 * 1024)
+                if total > 0 and cur_block > last_reported:
+                    last_reported = cur_block
+                    pct = int(downloaded * 100 / total)
+                    print(f"\r  下载进度: {pct}% ({downloaded / 1024 / 1024:.1f} / "
+                          f"{total / 1024 / 1024:.1f} MB)", end="", flush=True)
+        if total > 0:
+            print(f"\r  下载进度: 100% ({total / 1024 / 1024:.1f} / "
+                  f"{total / 1024 / 1024:.1f} MB)")
+
+        # 校验下载完整性
+        actual_size = output_path.stat().st_size
+        if total > 0 and actual_size < total:
+            log.warning(f"视频下载不完整: {actual_size}/{total} 字节，下次运行将续传")
             return False
+        log.info(f"下载完成: {output_path}")
+        return True
     except Exception as e:
         log.error(f"下载异常: {e}")
         return False
@@ -680,6 +707,10 @@ def process_tencent_meeting(task: dict, config: dict, creds: dict):
         #     summary = parse_summary_from_page_text(page_text)
 
         safe_title = safe_filename(title)
+        # 去除标题中与日期前缀重复的日期信息
+        date_ymd = date_prefix.rstrip("-") if date_prefix else ""
+        if date_ymd:
+            safe_title = safe_filename(strip_date_from_title(title, date_ymd))
         filename = f"{date_prefix}{safe_title}"
         log.info(f"最终文件名: {filename}")
 
@@ -720,3 +751,25 @@ def process_tencent_meeting(task: dict, config: dict, creds: dict):
     except Exception as e:
         log.error(f"处理失败: {e}", exc_info=True)
         raise
+
+
+def main():
+    config, creds = load_config()
+    tasks = config.get("tasks", [])
+    tm_tasks = [t for t in tasks if t.get("source_type") == "tencent_meeting"]
+    if not tm_tasks:
+        log.warning("input.yaml 中无 tencent_meeting 类型任务")
+        return
+
+    for i, task in enumerate(tm_tasks):
+        log.info(f"=== 腾讯会议任务 {i+1}/{len(tm_tasks)} ===")
+        try:
+            process_tencent_meeting(task, config, creds)
+        except Exception:
+            log.exception(f"任务处理失败: {task.get('source_huifang_url')}")
+
+    log.info("所有腾讯会议任务处理完成")
+
+
+if __name__ == "__main__":
+    main()

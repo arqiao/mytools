@@ -20,16 +20,11 @@ s1_yitang_wikicopy:
 # 回放任务列表 — 支持多种视频源
 tasks:
   # 一堂（视频+文稿）
-  - source_type: "yitang"           # 一堂（视频+文稿）
-    # working……直播2026春季马拉松。
-    source_huifang_url: "https://air.yitang.top/live/XNBW6NYTSm"
-    source_wiki_url: "https://yitang.top/fs-doc/ff4404a7811fe5d497e66f1c4ef0e79d/JvpHdyqtEo2lscx17UTcSZJkn3f"
-    target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/SEdNwtd2UidDhtkMGzFcKAnWnKh"
-  - source_type: "yitang"           # 一堂（视频+文稿）
-    # working……直播2026春季马拉松。
-    source_huifang_url: ""
-    source_wiki_url: "https://yitang.top/fs-doc/2fee14f2bab033a02aa59d8605513504/VH0zdsu1MoS5OQxFUDOcRW20nge"
-    target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/K31NwhbX2iyY9HkhGkacSSAin3c"
+  # - source_type: "yitang"           # 一堂（视频+文稿）
+  #   # working……直播2026春季马拉松。
+  #   source_huifang_url: "https://air.yitang.top/live/XNBW6NYTSm"
+  #   source_wiki_url: "https://yitang.top/fs-doc/ff4404a7811fe5d497e66f1c4ef0e79d/JvpHdyqtEo2lscx17UTcSZJkn3f"
+  #   target_wiki_url: "https://arqiaoknow.feishu.cn/wiki/SEdNwtd2UidDhtkMGzFcKAnWnKh"
   # - source_type: "yitang"           # 一堂（视频+文稿）
   #   # BUG……CASE……专题——调研课1
   #   source_huifang_url: "https://air.yitang.top/live/QogYGcdsVO?lessonId=b1I66377680b3b4e&noTrial=1&_uds=pd_lesson_detail_air&ticket=oe9x1xEC0Z1qmM3H&u=355973"
@@ -72,11 +67,27 @@ tasks:
   #   output_name: ""                  # 可选，手动指定输出文件名（不含扩展名，留空则自动生成）
 
 
-  # - source_type: "feishu_minutes"    # 飞书妙记
-  #   source_huifang_url: "https://waytoagi.feishu.cn/minutes/obcndie8r4z6726gw2j78zuw"
-  #   source_wiki_url: "https://waytoagi.feishu.cn/wiki/NvpCwzdQkim75skdhuPc8EJNnfh"
-  #   target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
-  #   title: ""                       # 可选，手动指定标题（留空则自动获取）
+  - source_type: "feishu_minutes"    # 飞书妙记
+    source_huifang_url: "https://waytoagi.feishu.cn/minutes/obcnevazl3l8z8955w9gk64v"
+    source_wiki_url: "https://waytoagi.feishu.cn/wiki/OCyVwwIqci5IAJkXAeUcMrZUnCc"
+    target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
+    title: ""                       # 可选，手动指定标题（留空则自动获取）
+  - source_type: "feishu_minutes"    # 飞书妙记
+    source_huifang_url: "https://waytoagi.feishu.cn/minutes/obcnf9z56ls16524h8oo4646"
+    source_wiki_url: "https://waytoagi.feishu.cn/wiki/Q81dw1byZimIN5kDRUHcHs7Bnaf"
+    target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
+    title: ""                       # 可选，手动指定标题（留空则自动获取）
+  - source_type: "feishu_minutes"    # 飞书妙记
+    source_huifang_url: "https://ucnc4u6nh1aq.feishu.cn/minutes/obcnhmk5iia41238tab769r7"
+    source_wiki_url: "https://waytoagi.feishu.cn/wiki/XcvtwMJjJikeGTkndb3clhdjnhe"
+    target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
+    title: ""                       # 可选，手动指定标题（留空则自动获取）
+  - source_type: "feishu_minutes"    # 飞书妙记
+    source_huifang_url: "https://waytoagi.feishu.cn/minutes/obcnk2t8lqc81n3bgrto8c45"
+    source_wiki_url: "https://waytoagi.feishu.cn/wiki/V7hKwC4T0iol3XkGDwYcKRwtn8e"
+    target_wiki_url: ""               # 写入目标飞书 wiki（留空则不写入）
+    title: ""                       # 可选，手动指定标题（留空则自动获取）
+
 
   # - source_type: "tencent_meeting"  # 腾讯会议回放
   #   source_huifang_url: "https://meeting.tencent.com/cw/lJayL90E87"

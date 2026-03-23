@@ -231,12 +231,14 @@ python src/modules/feishu_auth.py
 4. 粘贴到 `credentials.yaml` 的 `feishu.browser_cookie`
 
 **输出文件**：
-- `output/{title}.ts` — 视频
-- `output/{title}.mp3` — 音频
-- `output/{title}_ori.srt` — 字幕（VTT 转 SRT，或 transcript 生成）
-- `output/{title}_ori.md` — 文字记录（带说话人标注）
+- `output/{date_prefix}{title}.ts` — 视频
+- `output/{date_prefix}{title}.mp3` — 音频
+- `output/{date_prefix}{title}_ori.srt` — 字幕（VTT 转 SRT，或 transcript 生成）
+- `output/{date_prefix}{title}_ori.md` — 文字记录（带说话人标注）
 
 **注意事项**：
+- 文件名自动添加日期前缀（如 `260312-标题`），日期从妙记创建时间提取
+- 标题中已有的日期信息会自动去重，避免 `260312-03-12 标题` 的重复
 - user_access_token 过期时程序自动刷新（过期前 300s 触发），通常无需干预
 - user_refresh_token 有 30 天有效期，过期需重新运行 `feishu_auth.py` 授权
 - browser_cookie 用于跨租户场景，过期后需从浏览器重新复制
@@ -395,15 +397,18 @@ python src/s1_huifang.py
 **输入**：`cfg/input.yaml` 中的 tasks 列表
 **输出**：`output/{title}.ts`/`.mp4` + `.mp3`（+ 飞书妙记的 `_ori.srt`/`_ori.md`）
 
-调度器读取所有 task，按 `source_type` 分发到对应模块。
+调度器读取所有 task，按 `source_type` 分发到对应模块。未指定 `source_type` 时，根据 URL 模式自动推断平台类型（source_type 优先，URL 推断作为 fallback）。
 
 ### 1a) 单独运行某个平台模块
 
 ```bash
 python src/s1w_yitang_video.py  # 仅处理 source_type=yitang 的任务
+python src/s1w_feishumiaoji.py  # 仅处理 source_type=feishu_minutes 的任务
+python src/s1w_tencentmeeting.py # 仅处理 source_type=tencent_meeting 的任务
+python src/s1w_zhihu.py         # 仅处理 source_type=zhihu 的任务
 python src/s1w_panda.py         # 仅处理 source_type=panda 的任务
-python src/s1w_taobao.py        # 仅处理 source_type=taobao 的任务
 python src/s1w_xiaoe.py         # 仅处理 source_type=xiaoe 的任务
+python src/s1w_taobao.py        # 仅处理 source_type=taobao 的任务
 ```
 
 这些模块有独立的 `main()`，会从 input.yaml 筛选对应 source_type 的任务。
@@ -427,6 +432,21 @@ python src/modules/feishu_auth.py
 
 首次使用飞书妙记功能时运行。启动本地 HTTP 服务器（localhost:8080），自动打开浏览器完成 OAuth 授权，token 写入 credentials.yaml。超时 300 秒。
 
+## 通用功能特性
+
+### 断点续传与文件完整性保护
+
+- 视频下载支持 HTTP Range 断点续传（飞书妙记、腾讯会议、知乎训练营）
+- 下载完成后校验文件大小，不完整时标记为续传状态
+- ffmpeg 所有操作（音频提取、HLS 下载、TS 合并、格式转换）均使用临时文件写入，成功后再 rename，避免中断后留下不完整文件
+- Whisper 长音频转写支持断点续转：中断后重新运行时自动从上次完成的段落继续
+
+### 进度显示
+
+- 视频/音频下载：每 5MB 更新一次进度，同行刷新（`\r`）
+- 音频转换（ffmpeg）：每 1 分钟更新一次进度，显示百分比和时间
+- 所有进度在完成时保证输出 100%
+
 ## 常见问题排查
 
 ### 飞书 token 过期
@@ -435,7 +455,7 @@ python src/modules/feishu_auth.py
 
 **排查**：
 - user_access_token 过期：程序自动刷新（过期前 300s 触发），通常无需干预
-- user_refresh_token 过期（30 天有效期）：需重新运行 `python src/feishu_auth.py` 授权
+- user_refresh_token 过期（30 天有效期）：需重新运行 `python src/modules/feishu_auth.py` 授权
 - browser_cookie 过期：重新从浏览器复制
 
 ### 熊猫学院/小鹅通/淘宝 token 过期

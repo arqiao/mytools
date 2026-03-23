@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import subprocess
 import time
 import uuid
@@ -90,6 +91,37 @@ def _prepare_audio_for_whisper(audio_path: Path) -> Path:
     return mp3_to_wav(audio_path)
 
 
+def _parse_srt_time(ts: str) -> float:
+    """解析 SRT 时间戳 'HH:MM:SS,mmm' 为秒数"""
+    m = re.match(r"(\d+):(\d+):(\d+),(\d+)", ts.strip())
+    if not m:
+        return 0.0
+    h, mi, s, ms = int(m[1]), int(m[2]), int(m[3]), int(m[4])
+    return h * 3600 + mi * 60 + s + ms / 1000.0
+
+
+def _parse_srt_last_entry(srt_path: Path) -> tuple:
+    """解析 srt 文件最后一条字幕的序号和结束时间，返回 (last_idx, last_end_sec)"""
+    last_idx, last_end = 0, 0.0
+    try:
+        text = srt_path.read_text(encoding="utf-8").rstrip()
+        if not text:
+            return 0, 0.0
+        # SRT 条目之间用空行分隔，取最后一个非空块
+        blocks = re.split(r"\n\s*\n", text)
+        for block in reversed(blocks):
+            lines = block.strip().splitlines()
+            if len(lines) >= 2 and lines[0].strip().isdigit():
+                last_idx = int(lines[0].strip())
+                ts_match = re.search(r"-->\s*(\S+)", lines[1])
+                if ts_match:
+                    last_end = _parse_srt_time(ts_match.group(1))
+                break
+    except Exception as e:
+        log.warning(f"解析已有字幕文件失败: {e}")
+    return last_idx, last_end
+
+
 def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: bool = False) -> Path | None:
     """使用 Whisper 生成字幕（长音频自动分段处理）"""
     try:
@@ -151,8 +183,25 @@ def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: b
             log.info(f"长音频 ({total_sec / 60:.0f} 分钟)，分段处理...")
             n_segments = int((total_sec - overlap) / (segment_duration - overlap)) + 1
 
-            with open(srt_path, "w", encoding="utf-8") as f:
+            # 断点续转：检测已有字幕文件
+            resume_seg = 0
+            if srt_path.exists() and srt_path.stat().st_size > 0:
+                last_idx, last_end = _parse_srt_last_entry(srt_path)
+                if last_idx > 0:
+                    srt_idx = last_idx
+                    resume_seg = int(last_end / (segment_duration - overlap))
+                    log.info(f"检测到已有字幕 ({last_idx} 条，至 {format_srt_time(last_end)})，"
+                             f"从第 {resume_seg + 1}/{n_segments} 段续转")
+                    if resume_seg >= n_segments:
+                        log.info("所有段落已转写完成，跳过")
+                        return srt_path
+
+            file_mode = "a" if resume_seg > 0 else "w"
+            with open(srt_path, file_mode, encoding="utf-8") as f:
                 for seg_i in range(n_segments):
+                    if seg_i < resume_seg:
+                        continue
+
                     start_sec = seg_i * (segment_duration - overlap)
                     start_frame = int(start_sec * sample_rate)
                     end_frame = min(int((start_sec + segment_duration) * sample_rate), n_frames)
@@ -187,9 +236,16 @@ def transcribe_whisper(audio_path: Path, model_size: str = "small", force_cpu: b
                         f.write(f"{srt_idx}\n")
                         f.write(f"{format_srt_time(abs_start)} --> {format_srt_time(abs_end)}\n")
                         f.write(f"{_t2s.convert(segment.text.strip())}\n\n")
+                    f.flush()
 
                     del chunk_array, raw, segments
                     gc.collect()
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except ImportError:
+                        pass
         else:
             # 短音频直接处理
             log.info(f"开始转写: {whisper_input}")

@@ -18,7 +18,10 @@ def extract_minutes_token(url: str) -> str:
 
 
 def get_minutes_info(token: str, user_token: str, session: requests.Session):
-    """通过 Open API 获取妙记标题和时长，返回 (title, duration)"""
+    """通过 Open API 获取妙记标题、时长和创建时间，返回 (title, duration, create_time)
+
+    create_time 为 Unix 时间戳字符串（秒），无则为空字符串。
+    """
     url = f"{FEISHU_BASE}/minutes/v1/minutes/{token}"
     headers = {"Authorization": f"Bearer {user_token}"}
     resp = session.get(url, headers=headers, timeout=15)
@@ -28,5 +31,6 @@ def get_minutes_info(token: str, user_token: str, session: requests.Session):
     minute = data["data"]["minute"]
     title = minute.get("title", token)
     duration = minute.get("duration", "")
-    log.info(f"妙记标题: {title}, 时长: {duration}")
-    return title, duration
+    create_time = minute.get("create_time", "")
+    log.info(f"妙记标题: {title}, 时长: {duration}, 创建时间: {create_time}")
+    return title, duration, create_time
