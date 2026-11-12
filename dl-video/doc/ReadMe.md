@@ -117,7 +117,16 @@ python src/tools/model_downloader.py medium
 pip install pyannote.audio
 ```
 
-pyannote 模型需要 Hugging Face token，并需要在 Hugging Face 页面接受 `pyannote/speaker-diarization-community-1` 的模型授权条款。脚本可通过 `--token`、`HF_TOKEN` 或 `HUGGINGFACE_TOKEN` 读取 token。
+### 说话人分离凭据
+
+在 [Hugging Face Token 设置](https://huggingface.co/settings/tokens)创建可读取模型的 Token，并用同一账号在 [Community-1 模型页](https://huggingface.co/pyannote/speaker-diarization-community-1)接受访问条件。两个说话人入口均支持 `~/.config/secrets/gtokens.yaml` 的 `huggingface.token`：
+
+```yaml
+huggingface:
+  token: hf_替换为自己的Token
+```
+
+集中加载器采用简化 YAML，此值不加引号；真实值不写入项目文件。独立 `s3_speaker.py` 优先级为 `--token` → `HF_TOKEN` → `HUGGINGFACE_TOKEN` → `PYANNOTE_AUTH_TOKEN` → 集中字段。Qwen 的底层库按 `PYANNOTE_AUTH_TOKEN` → `HUGGINGFACE_TOKEN` → `HF_TOKEN` 取值；三个环境变量均为空且启用 `--qwen3-diarize` 时，项目才从集中字段临时注入 PYANNOTE_AUTH_TOKEN，调用成功或失败都会恢复原环境。普通 Qwen 转写不会读取该密钥。仅配置 Token 不代表已获得模型访问权限。
 
 ### s4/s5 LLM 依赖
 
@@ -584,7 +593,7 @@ output/03_学术OpenClaw 第一天02.mlx_l3.srt
 | 豆包 | `output/demo.doubao.srt` |
 | 飞书 | `output/demo.feishu.srt` |
 
-Qwen3-ASR 按识别块恢复标点，必要时近似回填；按句末标点、说话人和超过 5 秒停顿切分，不再强制 6 秒/固定字数上限，因此长句字幕可能超过 20 秒。当前不保存完整原始识别 JSON，也没有项目级分段续转。`--qwen3-diarize` 还需要模型授权与库接受的 Token（例如 `PYANNOTE_AUTH_TOKEN`），历史未完成真实说话人分离验收。
+Qwen3-ASR 按识别块恢复标点，必要时近似回填；按句末标点、说话人和超过 5 秒停顿切分，不再强制 6 秒/固定字数上限，因此长句字幕可能超过 20 秒。当前不保存完整原始识别 JSON，也没有项目级分段续转。`--qwen3-diarize` 还需要模型授权与 Token（支持上述集中字段或环境变量），历史未完成真实说话人分离验收。
 
 `.ts` 输入若有同名 `.mp3`，独立 S3 仍优先使用该 MP3；这是保留的兼容行为。Whisper 长音频支持按 SRT 尝试续转，不能推广到所有引擎。`--all` 会调用各已选后端，可能联网和计费；当前任一引擎有结果即可成功，不保证全部成功。Seed-ASR 使用 Agent Plan WebSocket 近实时发送 PCM，不整文件上传。
 
@@ -615,7 +624,7 @@ python src/s3_speaker.py output/demo.mp3 output/demo.mlx_turbo.srt --output outp
 | `-h`, `--help` | 开关 | 关闭 | 显示帮助并退出 |
 | `--backend pyannote` | 选项 | `pyannote` | 多人识别后端；当前仅支持 pyannote |
 | `--model MODEL` | 选项 | `pyannote/speaker-diarization-community-1` | pyannote diarization 模型 |
-| `--token TOKEN` | 选项 | `None` | Hugging Face token；也可用 `HF_TOKEN` 或 `HUGGINGFACE_TOKEN` |
+| `--token TOKEN` | 选项 | `None` | Hugging Face token；优先于环境变量和 gtokens.yaml 的 huggingface.token |
 | `--output OUTPUT` | 选项 | `None` | 输出 SRT 路径；默认在原 SRT stem 后追加 `.speaker` |
 | `--unknown LABEL` | 选项 | `SPEAKER_??` | 无匹配 speaker 时使用的标签 |
 

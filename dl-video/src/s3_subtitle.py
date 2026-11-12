@@ -33,7 +33,7 @@
   python src/s3_subtitle.py output/demo.mp4 --qwen3-asr
   python src/s3_subtitle.py output/demo.mp4 --qwen3-asr --qwen3-language Chinese --qwen3-context "剪映 keyframe"
   # 说话人分离需先安装: python -m pip install "mlx-qwen3-asr[diarize]==0.4.4"
-  # 并接受 pyannote/speaker-diarization-community-1 的模型条款，设置 PYANNOTE_AUTH_TOKEN
+  # 并接受 pyannote/speaker-diarization-community-1 条款；Token 可存 gtokens.yaml 的 huggingface.token
   python src/s3_subtitle.py output/demo.mp4 --qwen3-asr --qwen3-diarize
 
   # 使用云端 ASR 引擎
@@ -109,6 +109,7 @@ except ImportError:
 
 from modules.ffmpeg_utils import mp3_to_wav, mp3_to_pcm, _get_duration
 from modules.config_utils import load_config as _load_config
+from modules.config_utils import load_huggingface_token
 from modules.progress_utils import InlineProgress, clear_active_progress
 
 # 繁体转简体转换器
@@ -997,8 +998,20 @@ def transcribe_qwen3_asr(audio_path: Path, language: str | None = None,
         return None
 
     prepared_audio = None
+    injected_pyannote_token = False
     try:
         from mlx_qwen3_asr import transcribe
+
+        if diarize and not any(os.environ.get(name) for name in (
+            "PYANNOTE_AUTH_TOKEN", "HUGGINGFACE_TOKEN", "HF_TOKEN",
+        )):
+            token = load_huggingface_token()
+            if token:
+                # The library accepts auth through the environment only. Keep it
+                # scoped to this call; never overwrite explicit user settings.
+                previous_pyannote_token = os.environ.get("PYANNOTE_AUTH_TOKEN")
+                os.environ["PYANNOTE_AUTH_TOKEN"] = token
+                injected_pyannote_token = True
 
         log.info(f"  模型: {QWEN3_ASR_MODEL}")
         log.info(f"  时间轴对齐模型: {QWEN3_ALIGNER_MODEL}")
@@ -1049,6 +1062,11 @@ def transcribe_qwen3_asr(audio_path: Path, language: str | None = None,
         log.error(f"Qwen3-ASR 转写失败: {e}")
         return None
     finally:
+        if injected_pyannote_token:
+            if previous_pyannote_token is None:
+                os.environ.pop("PYANNOTE_AUTH_TOKEN", None)
+            else:
+                os.environ["PYANNOTE_AUTH_TOKEN"] = previous_pyannote_token
         _cleanup_prepared_audio(audio_path, prepared_audio)
 
 

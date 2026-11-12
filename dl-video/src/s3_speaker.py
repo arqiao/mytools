@@ -21,8 +21,8 @@
   audio_file         输入音频路径（如 output/demo.mp3）
   srt_file           输入 SRT 路径（如 output/demo.mlx_turbo.srt）
   --backend          说话人识别后端: pyannote（目前仅支持此选项）
-  --model NAME       pyannote 模型名（默认: pyannote/speaker-diarization-3.1）
-  --token TOKEN      HuggingFace token；也可使用环境变量 HF_TOKEN 或 HUGGINGFACE_TOKEN
+  --model NAME       pyannote 模型名（默认: pyannote/speaker-diarization-community-1）
+  --token TOKEN      优先命令行，再环境变量，最后 gtokens.yaml 的 huggingface.token
   --output PATH      输出 SRT 路径；默认在原 SRT 文件名后追加 .speaker
   --unknown LABEL    无匹配说话人时使用的标签（默认: SPEAKER_??）
 """
@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from modules.config_utils import load_huggingface_token
 
 
 SCRIPT_DIR = Path(__file__).parent
@@ -221,7 +222,8 @@ def run_pyannote(audio_path: Path, model: str, token: str) -> list[SpeakerSegmen
 
 
 def resolve_token(cli_token: str | None) -> str | None:
-    return cli_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    return (cli_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+            or os.environ.get("PYANNOTE_AUTH_TOKEN") or load_huggingface_token())
 
 
 def main():
@@ -233,7 +235,7 @@ def main():
     parser.add_argument("--model", default=DEFAULT_PYANNOTE_MODEL,
                         help=f"pyannote 模型名，默认: {DEFAULT_PYANNOTE_MODEL}")
     parser.add_argument("--token", default=None,
-                        help="Hugging Face token；也可使用环境变量 HF_TOKEN 或 HUGGINGFACE_TOKEN")
+                        help="Hugging Face token；默认读环境变量或 gtokens.yaml 的 huggingface.token")
     parser.add_argument("--output", default=None,
                         help="输出 SRT 路径；默认在原 SRT 文件名后追加 .speaker")
     parser.add_argument("--unknown", default="SPEAKER_??",
@@ -253,7 +255,7 @@ def main():
 
     token = resolve_token(args.token)
     if not token:
-        log.error("pyannote 需要 Hugging Face token。请设置 HF_TOKEN，或使用 --token。")
+        log.error("pyannote 需要 Hugging Face token。请配置 gtokens.yaml 的 huggingface.token、HF_TOKEN 或 --token。")
         return
 
     entries = parse_srt(srt_path)

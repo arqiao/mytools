@@ -1,6 +1,7 @@
 """Qwen3-ASR 参数分派与字幕时间轴测试，不下载模型。"""
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -54,12 +55,12 @@ class Qwen3AsrTest(unittest.TestCase):
                                          context="剪映 keyframe", diarize=True)
 
     def _run_transcription(self, directory, result, *, language=None, context="",
-                           diarize=False, grouped=None):
+                           diarize=False, grouped=None, recognize_effect=None):
         video = Path(directory) / "lesson.mp4"
         video.touch()
         prepared = Path(directory) / "prepared.wav"
         prepared.touch()
-        recognize = Mock(return_value=result)
+        recognize = Mock(return_value=result, side_effect=recognize_effect)
         group = Mock(return_value=grouped if grouped is not None else [
             {"start": 65.25, "end": 68.5, "text": "你好，世界。"}
         ])
@@ -71,6 +72,9 @@ class Qwen3AsrTest(unittest.TestCase):
             ),
         }
         with patch.dict(sys.modules, fake_modules), \
+             patch("modules.config_utils._secrets_load", return_value={
+                 "huggingface": {"token": "synthetic-token"},
+             }), \
              patch.object(s3_subtitle, "_resolve_qwen3_model", create=True,
                           side_effect=lambda repo, weights: repo), \
              patch.object(s3_subtitle, "_is_apple_silicon_mac", return_value=True), \
@@ -139,6 +143,39 @@ class Qwen3AsrTest(unittest.TestCase):
             self.assertIsNone(output)
             group.assert_not_called()
             self.assertFalse((Path(directory) / "lesson.qwen3_asr.srt").exists())
+
+    def test_diarization_reads_saved_token_and_restores_environment_on_failure(self):
+        def fail(*args, **kwargs):
+            self.assertEqual(os.environ.get("PYANNOTE_AUTH_TOKEN"), "synthetic-token")
+            raise RuntimeError("synthetic recognition failure")
+
+        for initial in ({}, {"PYANNOTE_AUTH_TOKEN": ""}):
+            with self.subTest(initial=initial), patch.dict(os.environ, initial, clear=True), \
+                 tempfile.TemporaryDirectory() as directory:
+                output, _, _, _ = self._run_transcription(
+                    directory, None, diarize=True, recognize_effect=fail,
+                )
+                self.assertIsNone(output)
+                self.assertEqual(os.environ.get("PYANNOTE_AUTH_TOKEN"),
+                                 initial.get("PYANNOTE_AUTH_TOKEN"))
+
+    def test_explicit_environment_skips_secret_file(self):
+        for name in ("PYANNOTE_AUTH_TOKEN", "HUGGINGFACE_TOKEN", "HF_TOKEN"):
+            with self.subTest(name=name), patch.dict(os.environ, {name: "explicit"}, clear=True), \
+                 patch.object(s3_subtitle, "load_huggingface_token") as saved, \
+                 tempfile.TemporaryDirectory() as directory:
+                self._run_transcription(directory, None, diarize=True,
+                                        recognize_effect=RuntimeError("synthetic failure"))
+                saved.assert_not_called()
+                self.assertEqual(os.environ[name], "explicit")
+
+    def test_plain_transcription_does_not_read_diarization_secret(self):
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(s3_subtitle, "load_huggingface_token") as saved, \
+             tempfile.TemporaryDirectory() as directory:
+            self._run_transcription(directory, None, diarize=False,
+                                    recognize_effect=RuntimeError("synthetic failure"))
+            saved.assert_not_called()
 
     def test_truncated_recognition_is_not_reported_as_complete(self):
         result = SimpleNamespace(text="被截断", language="Chinese",

@@ -33,6 +33,16 @@ def is_valid_target_wiki_url(url: str) -> bool:
     )
 
 
+def load_huggingface_token() -> str | None:
+    """只读取 gtokens 中的模型下载凭据，不加载其他组或回写文件。"""
+    data = _secrets_load("gtokens")
+    provider = data.get("huggingface")
+    token = provider.get("token") if isinstance(provider, dict) else None
+    if isinstance(token, str):
+        return token.strip() or None
+    return None
+
+
 def load_config(include_input=True):
     """加载项目配置（config.yaml + input.yaml）和集中 secrets。
 

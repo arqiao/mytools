@@ -105,7 +105,7 @@ MLX Whisper 超过 30 分钟按 20 分钟/2 秒重叠切段、flush SRT，按已
 
 视频一般预处理本机临时音频；Seed-ASR 直接由 ffmpeg 管道送 PCM。S3 仍保留 TS 同名 MP3 优先的旧逻辑。Qwen 临时文件在 finally 清理；不同 Whisper 失败分支可能留临时文件，不宣称一切失败都会清理。
 
-说话人有两种入口：Qwen --qwen3-diarize 标注“说话人N”；s3_speaker 对已有字幕按最大时间重叠标注 [SPEAKER_00]。两者都不是实名声纹识别，均需额外依赖/授权；本项目历史没有完整真实验收。
+说话人有两种入口：Qwen --qwen3-diarize 标注“说话人N”；s3_speaker 对已有字幕按最大时间重叠标注 [SPEAKER_00]。两者都不是实名声纹识别，均需额外依赖/授权；本项目历史没有完整真实验收。Token 可由 config_utils.load_huggingface_token 只加载 gtokens 组的 huggingface.token；显式参数/环境变量优先。Qwen 仅启用 diarize 且无环境凭据时临时注入库所需变量，finally 恢复；普通转写不读该字段。
 
 ## S4/S5 的模型、提示词和失败
 

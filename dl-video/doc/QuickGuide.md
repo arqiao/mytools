@@ -109,7 +109,7 @@ python src/s4_srt_fix.py --subtitle 'output/demo.qwen3_asr.srt' --no-transcript
 python src/s5_addon.py --subtitle 'output/demo.qwen3_asr_fix.srt' --no-transcript --subtitle-only
 ```
 
-Qwen 参数目前不能由流水线透传，需先单独 S3。说话人功能依赖 pyannote 和模型授权，标注身份编号，不识别真人姓名。模型完整缓存按 14 天检查更新；缺失可下载，更新失败有完整旧缓存时继续。
+Qwen 参数目前不能由流水线透传，需先单独 S3。说话人功能依赖 pyannote 和模型授权，标注身份编号，不识别真人姓名。Token 可存入 `~/.config/secrets/gtokens.yaml` 的 `huggingface.token`，两个说话人入口会在没有显式参数/环境变量时读取，格式与优先级见操作说明。模型完整缓存按 14 天检查更新；缺失可下载，更新失败有完整旧缓存时继续。
 
 MLX Whisper 超过 30 分钟自动按 20 分钟、2 秒重叠分段并尝试续转；Qwen 当前没有同样的项目级断点机制。Qwen 按整句生成字幕，长句可能超过 20 秒。Seed-ASR 用 Agent Plan WebSocket，读取 volcengine-agentplan.api_key，接近实时发送 PCM，无需 endpoint_id。
 

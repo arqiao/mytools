@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-11-12T07:33:23-08:00",
+  "captured_at": "2026-11-12T09:42:46-08:00",
   "timezone": "America/Los_Angeles",
   "scope": "Local source, tests, public configuration, runtime prompts and package metadata; excludes private input, secrets, models, runtime outputs and external shared implementations.",
   "remote_baseline": "801ee6352ddfe116d0216e386461321cb843369b (historical, not queried in this audit)",
@@ -21,7 +21,7 @@
     "prompt/srtfix-ref.md": "1e99bcabdba06181517a3d4cf6534cbbe77ea8c0754020296cf6d0b1fd8a508d",
     "src/model_downloader.py": "7266a5eb45f2957bc662f1987059ed9facd97a02653ffc4c224da782f5a98640",
     "src/modules/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "src/modules/config_utils.py": "682348ff33fa8631703a147067ed65a21e77fb4efd7f0e064df119cb26eaa1f9",
+    "src/modules/config_utils.py": "b63d7531cde4c9146032d353e379a6362895408f7fadf4c6bb181ca3bb85cdff",
     "src/modules/feishu_auth.py": "1f5c47c247316425ca5c7f03ed7d2ec76050ea02b8dc3c2fb0c5cd76e6afc82d",
     "src/modules/feishu_browser_cookie.py": "e4ef9b7872ed5a0c1183ec0faa0ecc177aeb2d4a9758286f9c9ac30d7e9ce836",
     "src/modules/feishu_minutes.py": "362662e7900ba720470719fe77143cd6da11cb7ad51cd4f20b7f54ddeee5f21c",
@@ -42,14 +42,15 @@
     "src/s1w_zhihu.py": "69a9860e3376a3ebed35e998dfea66d5a68aefb020783a3c19562d3acae8e0ad",
     "src/s2_wiki.py": "d5718622f1937720856978a477bdeee2f07816cdd2661d51a57ec7b394ec38d4",
     "src/s2w_yitang_wiki.py": "3e7f0031d0f4c318e3d544dcb9b952dbffb21f8fc58b66bacec5b6e467e10967",
-    "src/s3_speaker.py": "4a218d053d009d1ec38288772d6c958d6e3d32d7908686746ec76ed7b25f2814",
-    "src/s3_subtitle.py": "3ba477ebd586ae1f7ed883293aed4b1ae77c4fce66b0642a840e0a9086e93e9c",
+    "src/s3_speaker.py": "af02cebc3c03e22fe034f211b3e3bd65bbeb2f78cfadf7872519f28d23b75f52",
+    "src/s3_subtitle.py": "125c8f7301d4e0ce00b7b4d9da29eb391738161747ecc38e516a19b84415f296",
     "src/s4_srt_fix.py": "588e70e7f5ae5e4dbfc9349ed4ef238be1e7e6a77d3df4da244846abfb551a56",
     "src/s5_addon.py": "a8c9560429bb948f2c83046976621d0beff931dc1db259aee51180f8feb163ad",
     "src/test_feishu_shared_auth.py": "31af7598ecf61761108fd965e986fdb494c45dd1b5db356f15d8abac196672d7",
+    "src/test_huggingface_auth.py": "c6d24ca390ecfa8c62dcf1bb0b373f0afdc7992d56c2db65740b80108d0f1d33",
     "src/test_llm_structured_output.py": "d9f4a4cb5337b2cb44717770956f51d23db0bd07b52ce5336587bd774412b56c",
     "src/test_model_downloader.py": "c7ad7ef72cacd8bd03bfc35ac789192a26b02f6ca9cbaee80eed7226aa866ff1",
-    "src/test_qwen3_asr.py": "7d3de16e7a2f0a9691aa278f5b383487dd86dee02e6e8bce0e9befd1c4299b5f",
+    "src/test_qwen3_asr.py": "4d236e72a4135fe853310a1277cd272aa451b9a0163b9c314274ef3ea37cb989",
     "src/test_run_pipeline_audio.py": "2f9ea45a6ff910f55535e52369ce7cd0e0a12b8b6ae639a04feed68220072e1e",
     "src/test_s2w_yitang_wiki.py": "7615ee473b4dee6731d854dfdb195bf14d5f975c4607d2c6359ea61d1a3b52e3",
     "src/test_s3_subtitle.py": "4681b934034a91b45f94095e58cd1c68d9e827ba56ead207f831b4112ab3d350",
@@ -61,5 +62,6 @@
     "src/tools/filter_changelog.py": "f8ccf538246cc82f22132954a7f8f12aebea5435a12199c04d72bfb2a2741dc2",
     "src/tools/model_downloader.py": "0a001ded8d8bb6e5f56d29e407f4b2e67a8a8cee93789c5d996da6ecc073d08e",
     "src/url2md.py": "38b75e278be81c3d93f9c99253c04e3a0e4f2c0688b3c4927bb90eeb84d83004"
-  }
+  },
+  "change_note": "Added centralized Hugging Face token support; 3 auth + 21 Qwen offline tests passed. Earlier documentation audit snapshot preserved separately."
 }
