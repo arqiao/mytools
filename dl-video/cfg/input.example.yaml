@@ -1,0 +1,9 @@
+# 复制为 cfg/input.yaml 后填写本机任务；凭据由集中加载器提供。
+path_output_dir: "output/"
+path_yitang_dir: "out-yitang/"
+path_wechat_dir: "out-wechat/"
+path_log_dir: "log-err/"
+titlePPL: ""
+titleShougong: ""
+tasks: []
+# 视频号示例见 input.wechat.example.yaml，也可直接使用 --wechat-url。

@@ -7,7 +7,7 @@ pip install requests pyyaml cryptography playwright
 playwright install chromium
 ```
 
-确保 ffmpeg 在 PATH 中，且 `cfg/credentials.yaml` 已配置好对应平台的凭证。
+确保 ffmpeg / ffprobe 在 PATH 中；凭据使用现有集中加载器，不新建 `cfg/credentials.yaml`。视频号使用元宝网页登录态。
 
 ## 各程序速查
 
@@ -17,9 +17,39 @@ playwright install chromium
 python src/run_pipeline.py
 ```
 
-自动执行 s1→s2→s3→s4→s5 全部五步，失败中断并飞书通知。
+按输入执行 S1–S5，失败中断；`--no-notify` 关闭飞书通知。Qwen3-ASR 与 Whisper 都执行 S4；视频号另外跳过 S2。
 输入：`cfg/input.yaml`（tasks 列表）+ `cfg/config.yaml`（步骤参数）
-输出：`output/` 或 `out-yitang/`（一堂任务自动切换）下的全部产出文件
+输出：`output/`、`out-yitang/`（一堂）或 `out-wechat/`（视频号）；已有文件续跑时跟随输入目录。
+
+已有原始视频时，可直接从 S3 开始，不再生成同名的持久化音频文件：
+
+```bash
+python src/run_pipeline.py --video-file out-yitang/demo.mp4
+```
+
+S3 仍会在系统临时目录中提取转写所需的 WAV，并在处理结束后清理。
+
+### 微信视频号完整流程
+
+视频、音频、字幕及后处理文件默认输出到项目根目录 `out-wechat/`，使用独立配置 `path_wechat_dir`。
+
+```bash
+# 查看计划
+python src/run_pipeline.py --config cfg/input.wechat.example.yaml --print-plan
+# 首次运行，在 Chromium 中手工登录元宝
+python src/run_pipeline.py --config cfg/input.wechat.example.yaml --no-wechat-headless --no-notify
+# 已有登录态；默认 S1 → S3 → S4 → S5
+python src/run_pipeline.py --wechat-url 'https://weixin.qq.com/sph/ALRGH1Htvi' --wechat-headless --no-notify
+# 使用 Whisper 执行 S3 → S4 → S5
+python src/run_pipeline.py --config cfg/input.wechat.example.yaml --subtitle-engine whisper --wechat-headless --no-notify
+# 独立下载 MP4/M4A
+python src/s1w_wechatchannels.py 'https://weixin.qq.com/sph/ALRGH1Htvi' --headless
+# 只下载并生成 ASR 字幕
+python src/run_pipeline.py --config cfg/input.wechat.example.yaml --to-step s3 --wechat-headless --no-notify
+```
+
+独立 S1 使用元宝 `wx_export_id → findergetobjecturl` 获取媒体，不操作微信客户端。无 Wiki 的 S4/S5 使用字幕模式；输出按 `wx_<分享ID>` 命名。
+完整参数、配置、登录、续跑及失败处理见 [视频号指南](WeChatChannels.md)。
 
 ---
 
@@ -30,7 +60,7 @@ python src/s1_huifang.py
 ```
 
 读取 input.yaml 中所有 task，按 `source_type` 分发到对应平台模块。支持 URL 自动识别：未指定 `source_type` 时，根据 URL 模式自动推断平台类型。
-输入：`cfg/input.yaml` + `cfg/credentials.yaml`
+输入：`cfg/input.yaml` + 集中凭据加载器（视频号使用浏览器 profile）
 输出：`output/{title}.ts` 或 `.mp4` + `.mp3`（飞书妙记额外产出 `_ori.srt`、`_ori.md`）
 
 ---
@@ -211,25 +241,88 @@ tasks:
 
 ```bash
 python src/s2_wiki.py
+python src/s2_wiki.py <source_wiki_url> --attachments-only
 ```
 
 下载 task 中 `source_wiki_url` 指定的飞书 wiki 为 markdown；yitang 类型任务分发到 s2w_yitang_wiki.py；如配置了 `target_wiki_url` 则将处理结果写回飞书。
+`--attachments-only` 模式只下载附件（视频、音频、PDF 等），不下载全文。对于飞书页面中嵌入的 iframe 妙记视频，会调用 `s1w_feishumiaoji` 的下载链路获取视频文件。
 输入：input.yaml 中的 `source_wiki_url`、`target_wiki_url`
-输出：`output/{title}_wiki.md`（普通任务）或 `out-yitang/{title}.md`（一堂任务）
+输出：`output/{title}_wiki.md`（普通任务）或 `out-yitang/{title}.md`（一堂任务）；附件模式输出到 `out-yitang/{文档标题}/`
 
 ---
 
-### s3_subtitle.py — Whisper 字幕生成
+### s3_subtitle.py — 字幕生成
 
 ```bash
-python src/s3_subtitle.py
+python src/s3_subtitle.py output/03_学术OpenClaw\ 第一天02.mp3 --whisper
+python src/s3_subtitle.py output/demo.mp4 --whisper --backend mlx --model large-v3
+python src/s3_subtitle.py output/demo.mp4 --doubao-seed-asr
 ```
 
-当 s1 未产出 `_ori.srt` 时，用 Whisper 从 MP3 生成字幕。已有 `_ori.srt` 则跳过。
+当 s1 未产出 `_ori.srt` 时，从音频或视频生成字幕。流水线默认使用本机 Qwen3-ASR，也可选择 Whisper 或豆包 Seed-ASR 2.0；独立调用 S3 未指定引擎时默认使用 Whisper。流水线中已有 `_ori.srt` 则跳过。
+
+```bash
+python src/s3_subtitle.py output/demo.mp4 --qwen3-asr
+```
+
+Qwen3-ASR 需 Apple Silicon Mac 和 `mlx-qwen3-asr==0.4.4`；安装与模型缓存说明见 [完整文档](ReadMe.md#s3-qwen3-asr-依赖)。
 支持长音频断点续转：中断后重新运行时自动从上次完成的段落继续。
-输入：`output/{title}.mp3`
-输出：`output/{title}_wm.srt`
+转写时会输出进度提示：MLX 超过 30 分钟时自动分段并支持续转；其他情况每 10 秒刷新估算百分比和剩余时间。faster-whisper 按字幕时间或分段输出百分比。
+输入：`output/{title}.m4a`、`output/{title}.mp3` 或常见视频文件如 `output/{title}.mp4`
+输出：Mac 默认 `output/{title}.mlx_turbo.srt`；旧 faster-whisper medium 为 `output/{title}.wm.srt`
 配置：`config.yaml` 中 `s3_engine_suffix`
+
+常用命令：
+
+```bash
+# 首次使用先下载 Mac MLX 默认模型
+python src/tools/model_downloader.py --backend mlx large-v3-turbo
+
+# Apple Silicon Mac 默认：mlx-whisper + large-v3-turbo
+python src/s3_subtitle.py output/03_学术OpenClaw\ 第一天02.mp3 --whisper
+
+# 下载并使用 MLX 完整 large-v3，输出 .mlx_l3.srt
+python src/tools/model_downloader.py --backend mlx large-v3
+
+# MLX 完整 large-v3，输出 .mlx_l3.srt
+python src/s3_subtitle.py output/03_学术OpenClaw\ 第一天02.mp3 --whisper --backend mlx --model large-v3
+
+# 视频输入会先提取音频轨道，再输出同名前缀字幕
+python src/s3_subtitle.py output/demo.mp4 --whisper --backend mlx --model large-v3
+
+# 使用旧 faster-whisper 路径
+python src/s3_subtitle.py output/03_学术OpenClaw\ 第一天02.mp3 --whisper --backend faster-whisper --model medium
+
+# 使用 Agent Plan 豆包 Seed-ASR 2.0 直接识别视频
+# 凭证读取 gkeys.yaml 的 volcengine-agentplan.api_key
+python src/s3_subtitle.py output/demo.mp4 --doubao-seed-asr
+```
+
+`--doubao-seed-asr` 使用准确率优先的 Agent Plan WebSocket 单流接口，以 200ms PCM 音频包实时发送；无需 `endpoint_id`，也不会把整个媒体文件放入 Base64 请求体。流水线可用 `--s3-engine doubao-seed-asr` 选择云端识别。
+
+关键参数：`--doubao-seed-asr`、`--backend auto|mlx|faster-whisper`、`--model large-v3-turbo|medium|large`、`--cpu`。
+完整参数说明见 `doc/ReadMe.md` 的 `src/s3_subtitle.py — s3 媒体转字幕`。
+
+---
+
+### s3_speaker.py — 说话人标注
+
+```bash
+HF_TOKEN=hf_xxx python src/s3_speaker.py output/03_学术OpenClaw\ 第一天02.mp3 output/03_学术OpenClaw\ 第一天02.mlx_turbo.srt
+```
+
+读取已有 SRT 和音频，使用 pyannote 做多人识别，并输出带说话人标签的字幕。
+输入：`output/{title}.mp3` + `output/{title}.mlx_turbo.srt`
+输出：`output/{title}.mlx_turbo.speaker.srt`
+标签形式：保留 pyannote 原始标签，例如 `[SPEAKER_00]`
+
+首次使用需安装依赖，并在 Hugging Face 接受 `pyannote/speaker-diarization-community-1` 模型授权：
+
+```bash
+pip install pyannote.audio
+```
+
+完整参数说明见 `doc/ReadMe.md` 的 `src/s3_speaker.py — s3 字幕说话人标注`。
 
 ---
 
@@ -240,7 +333,7 @@ python src/s4_srt_fix.py
 ```
 
 用 LLM 对比教学文档修订字幕中的 ASR 错误和专业术语。已有 `_fix.srt` 则跳过。
-输入：`config.yaml` 中 `input.s4.subtitle`（优先）或 `_wm.srt` + `input.s4.transcript`（可选）
+输入：`config.yaml` 中 `input.s4.subtitle`（优先）或任一 s3 字幕（如 `.mlx_turbo.srt`、`.wm.srt`）+ `input.s4.transcript`（可选）
 输出：`{stem}_fix.srt` + `{stem}_fix_changelog.md`（输出到输入文件同目录）
 配置：`config.yaml` 中 `s4_fix`（prompt、chunk_size）、`llm_plan`
 
@@ -265,4 +358,4 @@ LLM 对比字幕与教学文档，提取"字幕中有但文档中没有"的补�
 python src/modules/feishu_auth.py
 ```
 
-首次使用飞书妙记时运行。启动本地服务器（localhost:8080），自动打开浏览器完成 OAuth，token 写入 `cfg/credentials.yaml`。超时 300 秒。
+需要飞书用户授权时运行。该入口转调本机 `feishu-access` 公共模块，由公共模块完成 OAuth、刷新及集中凭据回写；不写入项目内的 `cfg/credentials.yaml`。

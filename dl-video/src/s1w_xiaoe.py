@@ -1,10 +1,18 @@
+# 参数调用示例:
+#   python src/s1w_xiaoe.py
 """Step1-xiaoe: 小鹅通视频下载 — AES-128 DRM 解密
 
-使用方式:
-  1. 浏览器打开视频页面，F12 → Network → 找到 .m3u8 请求
-  2. 右键 Copy as cURL → 粘贴到 config.yaml 的 source_url 字段
-     （只需 m3u8 URL，不需要完整 curl 命令）
-  3. python src/s1_huifang.py
+用法:
+  # 通过 input.yaml 配置任务（source_type: "xiaoe"）
+  python src/s1_huifang.py
+
+  # 直接运行（读取 input.yaml 中 xiaoe 类型任务）
+  python src/s1w_xiaoe.py
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "xiaoe", source_huifang_url: 小鹅通页面/短链/m3u8 URL
+    示例: https://sxlo3.xetslk.com/sl/3SCVef
+    示例: https://appzvsjcfov9775.h5.xiaoeknow.com/v4/course/alive/l_xxx
 
 流程:
   m3u8 URL → 下载 m3u8 → 提取 key URL → 获取 AES key
@@ -15,7 +23,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import urljoin, urlparse
 
 import requests
 import yaml
@@ -57,12 +65,19 @@ def extract_m3u8_url(source_url: str) -> str:
 
 def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
     """用 Playwright + cookie 同时获取标题、日期和 m3u8 URL，返回 (title, date_str, m3u8_url)"""
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "当前环境未安装 playwright，无法打开小鹅通页面捕获 m3u8。"
+            "请先运行: python -m pip install playwright && python -m playwright install chromium；"
+            "或在浏览器 Network 中复制 .m3u8 URL 作为 source_huifang_url。"
+        ) from exc
     import time as _time
 
     # 小鹅通常见域名后缀，cookie 需要设在这些域名上
     XIAOE_DOMAINS = [".xiaoecloud.com", ".xiaoeknow.com", ".xiaoe-tech.com",
-                     ".xet.citv.cn"]
+                     ".xet.citv.cn", ".xetslk.com", ".xet.tech"]
 
     def _make_cookies(cookie_str, domain=None):
         """为指定域名生成 cookie 列表"""
@@ -84,7 +99,8 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context()
 
-        # 提取 app_id（如 appsbkkqmgs9185），为所有小鹅通域名预设 cookie
+        # 提取 app_id（如 appsbkkqmgs9185），为所有小鹅通域名预设 cookie。
+        # xetslk.com 这类短链域名通常会跳到 appid.h5.xiaoecloud.com。
         app_id_match = re.search(r'(app\w+)\.h5\.', domain)
         if app_id_match:
             app_id = app_id_match.group(1)
@@ -119,6 +135,17 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
                     # 直接导航到目标页面
                     page.goto(redirect_url, timeout=30000,
                               wait_until="domcontentloaded")
+
+        # 如果短链跳到了 appid.h5.*，再补一次真实域名 cookie 后刷新目标页。
+        final_domain = urlparse(page.url).netloc
+        final_app_match = re.search(r'(app\w+)\.h5\.', final_domain)
+        if final_app_match and final_app_match.group(1) != app_id:
+            real_app_id = final_app_match.group(1)
+            log.info(f"短链跳转，补充 {real_app_id} 的 cookie")
+            ctx.add_cookies(_make_cookies(cookie_str, final_domain))
+            for suffix in XIAOE_DOMAINS:
+                ctx.add_cookies(_make_cookies(cookie_str, f"{real_app_id}.h5{suffix}"))
+            page.reload(timeout=30000, wait_until="domcontentloaded")
 
         # 等待 SPA 加载视频播放器
         _time.sleep(12)
@@ -165,8 +192,6 @@ def fetch_page_info(page_url: str, cookie_str: str) -> tuple[str, str, str]:
 def download_m3u8(m3u8_url: str, referer: str = "") -> str:
     """下载 m3u8 内容（需要在签名过期前调用）"""
     if not referer:
-        # 从 whref 参数推断 referer
-        m = re.search(r'whref=[^&]*\*\.xiaoecloud\.com', m3u8_url)
         referer = "https://appsbkkqmgs9185.h5.xiaoecloud.com/"
     headers = {
         "Origin": referer.rstrip("/"),
@@ -182,11 +207,13 @@ def download_m3u8(m3u8_url: str, referer: str = "") -> str:
     return resp.text
 
 
-def fetch_aes_key(key_url: str) -> bytes:
+def fetch_aes_key(key_url: str, referer: str = "") -> bytes:
     """从小鹅通 key server 获取 AES-128 密钥"""
+    if not referer:
+        referer = "https://appsbkkqmgs9185.h5.xiaoecloud.com/"
     headers = {
-        "Origin": "https://appsbkkqmgs9185.h5.xiaoecloud.com",
-        "Referer": "https://appsbkkqmgs9185.h5.xiaoecloud.com/",
+        "Origin": referer.rstrip("/"),
+        "Referer": referer,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
     resp = requests.get(key_url, headers=headers, timeout=15)
@@ -314,13 +341,18 @@ def process_xiaoe(task, config, creds):
     referer = f"{parsed.scheme}://{parsed.netloc}/"
     log.info(f"处理小鹅通视频: {page_url}")
 
-    # 1. 用 Playwright 获取标题 + 日期 + m3u8 URL
-    cookie_str = creds.get("xiaoe", {}).get("browser_cookie", "")
-    if not cookie_str:
-        raise ValueError("credentials.yaml 中缺少 xiaoe.browser_cookie")
-    title, date_prefix, m3u8_url = fetch_page_info(page_url, cookie_str)
-    if not m3u8_url:
-        raise RuntimeError("未能从页面捕获 m3u8 URL，请确认视频正常播放")
+    # 1. 页面/短链用 Playwright 捕获 m3u8；直接填 m3u8 则跳过浏览器。
+    if ".m3u8" in page_url:
+        title = task.get("title", "")
+        date_prefix = ""
+        m3u8_url = extract_m3u8_url(page_url)
+    else:
+        cookie_str = creds.get("xiaoe", {}).get("browser_cookie", "")
+        if not cookie_str:
+            raise ValueError("credentials.yaml 中缺少 xiaoe.browser_cookie")
+        title, date_prefix, m3u8_url = fetch_page_info(page_url, cookie_str)
+        if not m3u8_url:
+            raise RuntimeError("未能从页面捕获 m3u8 URL，请确认已登录、视频可播放")
 
     # 2. 下载 m3u8
     m3u8_text = download_m3u8(m3u8_url, referer)
@@ -328,7 +360,12 @@ def process_xiaoe(task, config, creds):
     # 3. 确定文件名（添加日期前缀）
     if not title:
         fid_match = re.search(r'fileId=(\d+)', m3u8_text)
-        title = f"xiaoe_{fid_match.group(1)}" if fid_match else "xiaoe_video"
+        if fid_match:
+            title = f"xiaoe_{fid_match.group(1)}"
+        else:
+            path_parts = [p for p in urlparse(m3u8_url).path.split("/") if p]
+            video_id = path_parts[-2] if len(path_parts) >= 2 else ""
+            title = f"xiaoe_{video_id}" if video_id else "xiaoe_video"
         log.warning(f"标题为空，使用默认名: {title}")
     clean_title = safe_filename(strip_date_from_title(title, date_prefix)) if date_prefix else safe_filename(title)
     base_name = f"{date_prefix}-{clean_title}" if date_prefix else clean_title
@@ -337,7 +374,7 @@ def process_xiaoe(task, config, creds):
     # 4. 下载视频：有 AES 加密则手动解密，否则 ffmpeg 直接下载
     key_match = re.search(r'URI="([^"]+)"', m3u8_text)
     if key_match:
-        aes_key = fetch_aes_key(key_match.group(1))
+        aes_key = fetch_aes_key(urljoin(m3u8_url, key_match.group(1)), referer)
         if not download_video(m3u8_text, m3u8_url, aes_key, referer, video_path):
             log.error("视频下载失败")
             return
@@ -348,7 +385,7 @@ def process_xiaoe(task, config, creds):
             return
 
     # 5. 提取音频
-    extract_audio(video_path, OUTPUT_DIR / f"{base_name}.mp3")
+    extract_audio(video_path, OUTPUT_DIR / f"{base_name}.m4a")
     log.info(f"小鹅通视频处理完成: {base_name}")
 
 

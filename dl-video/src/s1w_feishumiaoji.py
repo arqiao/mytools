@@ -1,8 +1,17 @@
+# 参数调用示例:
+#   python src/s1w_feishumiaoji.py
 """Step1-feishu: 飞书妙记下载 — 视频 + 音频 + 字幕/文字记录
 
-使用方式:
-  1. config.yaml 中配置 source_type: "feishu_minutes"
-  2. python src/s1_huifang.py
+用法:
+  # 通过 input.yaml 配置任务（source_type: "feishu_minutes"）
+  python src/s1_huifang.py
+
+  # 直接运行（读取 input.yaml 中 feishu_minutes 类型任务）
+  python src/s1w_feishumiaoji.py
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "feishu_minutes", source_huifang_url: 飞书妙记 URL
+  cfg/credentials.yaml — feishu.app_id / app_secret / browser_cookie
 """
 
 import logging
@@ -15,6 +24,7 @@ import requests
 import yaml
 
 from modules.feishu_token import FEISHU_BASE, ensure_feishu_token
+from modules.feishu_browser_cookie import resolve_cookie
 from modules.feishu_minutes import extract_minutes_token, get_minutes_info
 from modules.ffmpeg_utils import extract_audio
 from modules.config_utils import safe_filename, load_config, strip_date_from_title
@@ -96,16 +106,17 @@ def get_minutes_media(token, cookie, session, source_url):
     return title, video_url, vtt_url, create_time
 
 
-def download_video(video_url, output_path, cookie):
+def download_video(video_url, output_path, cookie, referer=None):
     """下载视频（飞书内部流式 API，需要 cookie 认证）。支持断点续传。"""
     if not video_url:
         log.warning("无视频 URL，跳过视频下载")
         return False
 
+    referer = referer or "https://waytoagi.feishu.cn/"
     existing_size = output_path.stat().st_size if output_path.exists() else 0
     headers = {
         "Cookie": cookie,
-        "Referer": "https://waytoagi.feishu.cn/",
+        "Referer": referer,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
     if existing_size > 0:
@@ -171,7 +182,12 @@ def download_vtt_subtitle(vtt_url, output_dir, base_name, cookie):
         "Referer": vtt_url.split("/minutes/")[0] + "/",
     }
     resp = requests.get(vtt_url, headers=headers, timeout=30)
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        log.warning(
+            f"VTT 字幕下载失败: status={resp.status_code} "
+            f"(可能 cookie 已过期，请刷新 feishu.browser_cookie 或确认本机浏览器已登录飞书)"
+        )
+        return False
     srt_text = vtt_to_srt(resp.text)
     srt_path.write_text(srt_text, encoding="utf-8")
     log.info(f"字幕已保存: {srt_path}")
@@ -331,7 +347,9 @@ def process_feishu_minutes(task, config, creds):
     token = extract_minutes_token(source_url)
     log.info(f"处理飞书妙记: token={token}")
 
-    cookie = creds["feishu"].get("browser_cookie", "")
+    cookie = resolve_cookie(source_url, creds["feishu"].get("browser_cookie", ""))
+    if not cookie:
+        log.warning("无飞书 cookie，字幕/文字记录/视频下载可能失败")
 
     page_title, video_url, vtt_url, create_time = get_minutes_media(
         token, cookie, session, source_url
@@ -388,7 +406,7 @@ def process_feishu_minutes(task, config, creds):
     video_path = output_dir / f"{base_name}.ts"
     download_video(video_url, video_path, cookie)
 
-    audio_path = output_dir / f"{base_name}.mp3"
+    audio_path = output_dir / f"{base_name}.m4a"
     extract_audio(video_path, audio_path)
 
     log.info(f"飞书妙记处理完成: {base_name}")

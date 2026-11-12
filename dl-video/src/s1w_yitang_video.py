@@ -1,4 +1,38 @@
-"""直播视频下载及讨论区导出工具"""
+# 参数调用示例:
+#   python src/s1w_yitang_video.py
+#   python src/s1w_yitang_video.py <url_yitanglive>
+#   python src/s1w_yitang_video.py <url_yitanglive> --audio
+"""一堂直播视频下载及讨论区导出工具
+
+用法:
+  # 通过 input.yaml 配置任务（source_type: "yitang"）
+  python src/s1_huifang.py
+
+  # 直接运行（默认生成全部：视频 + 音频 + 讨论区）
+  python src/s1w_yitang_video.py
+
+  # 指定一堂直播 URL
+  python src/s1w_yitang_video.py <url_yitanglive>
+
+  # 只下载视频
+  python src/s1w_yitang_video.py --video
+
+  # 只下载音频
+  python src/s1w_yitang_video.py --audio
+
+  # 只导出讨论区
+  python src/s1w_yitang_video.py --chat
+
+参数:
+  url_yitanglive  一堂直播 URL，如 https://air.yitang.top/live/UdFHDT40Yt
+  --video   只下载视频
+  --audio   只下载音频
+  --chat    只导出讨论区
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "yitang", source_huifang_url: 一堂回放 URL
+  cfg/credentials.yaml — yitang.cookie / token
+"""
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
@@ -8,22 +42,27 @@ import hmac
 import json
 import logging
 import re
+import subprocess
 import time
 from base64 import b64decode, b64encode
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 import requests
 import yaml
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
-from modules.ffmpeg_utils import extract_audio
+from modules.ffmpeg_utils import FFMPEG, extract_audio
 from modules.config_utils import load_config
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
-_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+try:
+    _input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+except yaml.YAMLError:
+    _input_cfg = {}
 LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -110,16 +149,17 @@ ICON_MAP = {
 
 
 class YitangLiveDownloader:
-    def __init__(self):
-        config, creds = load_config()
+    def __init__(self, include_input=True):
+        config, creds = load_config(include_input=include_input)
         self.config = config
         self.creds = creds
         self.session = requests.Session()
         self.icon_map = dict(ICON_MAP)  # 复制基础映射
         self._load_icon_map()  # 从 API 加载动态映射
-        self.output_prefix = self.config["s1_yitang_ailive"]["output_prefix"]
-        self.series_name = self.config["s1_yitang_ailive"]["query_copystr"]
-        self.output_dir = PROJECT_DIR / self.config["path_yitang_dir"]
+        ailive_cfg = self.config.get("s1_yitang_ailive", {})
+        self.output_prefix = ailive_cfg.get("output_prefix", "AI落地Live_")
+        self.series_name = ailive_cfg.get("query_copystr", "AI落地Live")
+        self.output_dir = PROJECT_DIR / self.config.get("path_yitang_dir", "out-yitang/")
 
     def _load_icon_map(self):
         """从 API 获取 icon 列表，仅补充静态映射中没有的条目"""
@@ -175,7 +215,7 @@ class YitangLiveDownloader:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         }
 
-    def fetch_replay_data(self, live_id: str) -> dict:
+    def fetch_replay_data(self, live_id: str, extra_params: dict = None) -> dict:
         """获取直播回放数据"""
         uri = "/api/air/room/replay"
         params = {
@@ -183,6 +223,8 @@ class YitangLiveDownloader:
             "lang": "zh-CN",
             "_uds": "onair_yitang_index_code4",
         }
+        if extra_params:
+            params.update(extra_params)
         url = f"https://air.yitang.top{uri}"
         headers = self._get_headers(uri, params)
         resp = self.session.get(url, params=params, headers=headers, timeout=30)
@@ -242,10 +284,49 @@ class YitangLiveDownloader:
 
     # ── 视频下载 ──────────────────────────────────────────
 
+    def _run_yt_dlp(self, cmd: list) -> int:
+        """运行 yt-dlp，并将高频下载进度压缩为单行刷新。"""
+        import subprocess
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        progress_active = False
+        last_progress_at = 0.0
+        last_progress_text = ""
+        for line in proc.stdout:
+            text = line.rstrip("\r\n")
+            is_download_progress = text.startswith("[download]") and "%" in text
+            if is_download_progress:
+                now = time.time()
+                is_final = "100%" in text and " in " in text
+                if not is_final and (text == last_progress_text or now - last_progress_at < 5):
+                    continue
+                print("\r" + text[:160], end="", flush=True)
+                progress_active = True
+                last_progress_at = now
+                last_progress_text = text
+                if is_final:
+                    print()
+                    progress_active = False
+                continue
+            if progress_active:
+                print()
+                progress_active = False
+            print(text)
+        proc.wait()
+        if progress_active:
+            print()
+        return proc.returncode
+
     def download_video(self, video_url: str, output_path: Path) -> bool:
         """下载视频（m3u8 -> ts），yt-dlp 自带断点续传"""
         try:
-            import subprocess
             output_ts = output_path.with_suffix(".ts")
             if output_ts.exists():
                 log.info(f"视频已存在，跳过: {output_ts}")
@@ -255,8 +336,8 @@ class YitangLiveDownloader:
                 "-o", str(output_ts),
                 video_url,
             ]
-            result = subprocess.run(cmd)
-            if result.returncode == 0 and output_ts.exists():
+            returncode = self._run_yt_dlp(cmd)
+            if returncode == 0 and output_ts.exists():
                 log.info(f"视频下载成功: {output_ts}")
                 return True
             log.warning("视频下载失败")
@@ -295,43 +376,76 @@ class YitangLiveDownloader:
             return False
 
     def download_audio(self, audio_url: str, output_path: Path) -> bool:
-        """下载音频（mp3），支持断点续传"""
+        """下载音频并输出为 m4a，下载阶段支持断点续传。"""
         try:
-            mp3_path = output_path.with_suffix(".mp3")
+            audio_path = output_path.with_suffix(".m4a")
+            raw_path = output_path.with_suffix(".audio.download")
             req_headers = {}
             downloaded = 0
             mode = "wb"
 
-            if mp3_path.exists():
-                downloaded = mp3_path.stat().st_size
+            if audio_path.exists() and audio_path.stat().st_size > 1024:
+                log.info(f"音频已存在，跳过: {audio_path}")
+                return audio_path
+
+            if raw_path.exists():
+                downloaded = raw_path.stat().st_size
                 head = self.session.head(audio_url, timeout=15)
                 total_size = int(head.headers.get("content-length", 0))
                 if total_size and downloaded >= total_size:
-                    log.info(f"音频已存在，跳过: {mp3_path}")
-                    return mp3_path
-                req_headers["Range"] = f"bytes={downloaded}-"
-                mode = "ab"
-                log.info(f"音频续传，已下载 {downloaded / 1024 / 1024:.1f} MB")
+                    log.info(f"音频原始文件已下载，开始封装为 m4a: {raw_path}")
+                    mode = "ab"
+                else:
+                    req_headers["Range"] = f"bytes={downloaded}-"
+                    mode = "ab"
+                    log.info(f"音频续传，已下载 {downloaded / 1024 / 1024:.1f} MB")
+            else:
+                total_size = 0
 
-            resp = self.session.get(audio_url, stream=True, headers=req_headers, timeout=300)
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0)) + downloaded
-            with open(mp3_path, mode) as f:
-                last_reported = downloaded // (5 * 1024 * 1024)
-                for chunk in resp.iter_content(chunk_size=1024 * 256):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    cur_block = downloaded // (5 * 1024 * 1024)
-                    if total and cur_block > last_reported:
-                        last_reported = cur_block
-                        pct = downloaded * 100 // total
-                        print(f"\r  音频下载: {pct}% ({downloaded / 1024 / 1024:.1f} / "
-                              f"{total / 1024 / 1024:.1f} MB)", end="", flush=True)
-            if total:
-                print(f"\r  音频下载: 100% ({total / 1024 / 1024:.1f} / "
-                      f"{total / 1024 / 1024:.1f} MB)")
-            log.info(f"音频下载成功: {mp3_path}")
-            return mp3_path
+            if not total_size or downloaded < total_size:
+                resp = self.session.get(audio_url, stream=True, headers=req_headers, timeout=300)
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0)) + downloaded
+                progress_active = False
+                last_progress_at = 0.0
+                with open(raw_path, mode) as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 256):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if total and now - last_progress_at >= 5:
+                            pct = downloaded * 100 // total
+                            print(f"\r  音频下载: {pct}% ({downloaded / 1024 / 1024:.1f} / "
+                                  f"{total / 1024 / 1024:.1f} MB)", end="", flush=True)
+                            progress_active = True
+                            last_progress_at = now
+                if total:
+                    print(f"\r  音频下载: 100% ({total / 1024 / 1024:.1f} / "
+                          f"{total / 1024 / 1024:.1f} MB)")
+                elif progress_active:
+                    print()
+
+            tmp_path = audio_path.with_suffix(".tmp.m4a")
+            cmd = [FFMPEG, "-y", "-i", str(raw_path), "-vn", "-c:a", "copy", str(tmp_path)]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                log.warning("音频封装为 m4a 失败，回退为 AAC 编码")
+                cmd = [
+                    FFMPEG, "-y", "-i", str(raw_path),
+                    "-vn", "-c:a", "aac", "-b:a", "128k",
+                    str(tmp_path),
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                tmp_path.unlink(missing_ok=True)
+                raise RuntimeError(result.stderr[-1000:])
+
+            tmp_path.replace(audio_path)
+            raw_path.unlink(missing_ok=True)
+            log.info(f"音频下载成功: {audio_path}")
+            return audio_path
         except Exception as e:
             log.error(f"音频下载失败: {e}")
             return None
@@ -494,9 +608,13 @@ class YitangLiveDownloader:
             live_id = live_id_match.group(1)
             log.info(f"  Live ID: {live_id}")
 
+            # 从 URL 提取查询参数（如 rs）传给 API
+            url_qs = parse_qs(urlparse(source_url).query)
+            extra_params = {k: v[0] for k, v in url_qs.items() if k != "sid"}
+
             try:
                 # 1. 获取回放数据
-                data = self.fetch_replay_data(live_id)
+                data = self.fetch_replay_data(live_id, extra_params=extra_params)
                 replay = data.get("replay", {})
                 chats = data.get("chats", [])
                 duration = replay.get("duration", 0)
@@ -559,9 +677,9 @@ class YitangLiveDownloader:
                     if not got_audio:
                         log.info("服务端无独立音频文件，从本地视频提取")
                         video_file = video_path.with_suffix(".ts")
-                        mp3_path = video_path.with_suffix(".mp3")
+                        audio_path = video_path.with_suffix(".m4a")
                         if video_file.exists():
-                            extract_audio(video_file, mp3_path)
+                            extract_audio(video_file, audio_path)
                         else:
                             log.warning("视频文件不存在，无法提取音频")
 
@@ -584,6 +702,7 @@ def process_yitang_video(task, config, creds):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="直播视频下载及讨论区导出")
+    parser.add_argument("url_yitanglive", nargs="?", help="一堂直播 URL")
     parser.add_argument("--video", action="store_true", help="只下载视频")
     parser.add_argument("--audio", action="store_true", help="只下载音频")
     parser.add_argument("--chat", action="store_true", help="只导出讨论区")
@@ -593,5 +712,8 @@ if __name__ == "__main__":
     if not args.video and not args.audio and not args.chat:
         args.video = args.audio = args.chat = True
 
-    downloader = YitangLiveDownloader()
-    downloader.run(dl_video=args.video, dl_audio=args.audio, dl_chat=args.chat)
+    downloader = YitangLiveDownloader(include_input=not bool(args.url_yitanglive))
+    livestreams = None
+    if args.url_yitanglive:
+        livestreams = [{"source_url": args.url_yitanglive, "title": "", "output_name": ""}]
+    downloader.run(livestreams=livestreams, dl_video=args.video, dl_audio=args.audio, dl_chat=args.chat)

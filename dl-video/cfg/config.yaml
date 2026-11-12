@@ -1,9 +1,38 @@
-# 各步骤输入配置
+# 全局路径（所有步骤共用）
+path_output_dir: "output/"
+path_log_dir: "log-err/"
+path_yitang_dir: "out-yitang/"
+path_wechat_dir: "out-wechat/"  # 视频号专用；不受 path_output_dir 影响
+path_attachment_dir: "out-yitang/"
+
+# 视频号 S1：复用元宝浏览器登录态；不需要第三方解析 API Key
+wechat_channels:
+  browser_profile: ".browser_data_wxchannels"
+  headless: false               # 首次登录保持 false；登录后可用 --wechat-headless
+  login_timeout: 300            # 可见浏览器等待登录秒数
+  request_timeout: 30           # 单次元宝接口超时秒数
+  verify_decode: true           # MP4 全片解码验证；失败不进入 S3
+
+# 一堂 AILive 类课程的特殊处理
+s1_yitang_ailive:
+  output_prefix: "AI落地Live_"
+  query_copystr: "AI落地Live"
+
+# 一堂专题课 wiki 的默认复制边界。任务可用同名（去掉 default_）字段覆盖。
+# exclude_* 优先于同侧 include_*；full_copy: true 可忽略全部边界。
+s1_yitang_wikicopy:
+  default_exclude_before_heading: ""
+  default_include_start_heading: "开始上课"
+  default_include_end_heading: "作业与Candy"
+  default_exclude_after_heading: ""
+
+
+# 各步骤输入配置（兼容旧单步脚本；run_pipeline 会优先自动串联中间产物）
 input:
   # s1 的输入在 input.yaml 的 tasks 中配置
   s4:
     # 字幕文件路径（支持相对/绝对路径，需含 .srt 后缀）
-    # 示例：output/260310-创新11班_wm.srt
+    # 示例：output/260310-创新11班.wm.srt
     subtitle: ""
     # 逐字稿（支持文件路径或飞书 URL，可选）
     # 示例：output/260310-创新11班.md 或 https://arqiaoknow.feishu.cn/wiki/xxx
@@ -22,11 +51,11 @@ input:
 # 各步骤输出配置
 output:
   s4:
-    # 修正后字幕文件后缀（输入 xxx_wm.srt → 输出 xxx_wm_fix.srt）
+    # 修正后字幕文件后缀（输入 xxx.wm.srt → 输出 xxx.wm_fix.srt）
     suffix: "_fix"
     # S4 输出示例：
-    #   字幕：260310-创新11班_wm_fix.srt
-    #   变更日志：260310-创新11班_wm_fix_changelog.md
+    #   字幕：260310-创新11班.wm_fix.srt
+    #   变更日志：260310-创新11班.wm_fix_changelog.md
   s5:
     # 输出文件名自定义前缀（留空则自动从输入文件名提取）
     fnprefix: ""
@@ -37,15 +66,22 @@ output:
 
 # 字幕引擎后缀映射（引擎名 → 文件名后缀）
 s3_engine_suffix:
-  xunfei: "_xunfei"
-  aliyun: "_aliyun"
-  doubao: "_doubao"
-  feishu: "_feishu"
-  tencent: "_tencent"
-  whisper_large: "_wl"
-  whisper_medium: "_wm"
-  whisper_small: "_ws"
-  whisper_tiny: "_wt"
+  xunfei: ".xunfei"
+  aliyun: ".aliyun"
+  doubao: ".doubao"
+  doubao_seed_asr: ".seed_asr"
+  qwen3_asr: ".qwen3_asr"
+  feishu: ".feishu"
+  tencent: ".tencent"
+  whisper_large: ".wl"
+  whisper_medium: ".wm"
+  whisper_small: ".ws"
+  whisper_tiny: ".wt"
+  mlx_whisper_large_v3_turbo: ".mlx_turbo"
+  mlx_whisper_large_v3: ".mlx_l3"
+  mlx_whisper_medium: ".mlx_m"
+  mlx_whisper_small: ".mlx_s"
+  mlx_whisper_tiny: ".mlx_t"
 
 s4_fix:
   chunk_size: 80
@@ -54,7 +90,8 @@ s4_fix:
   custom_dict: "srtfix-dict.yaml"
 
 s5_analysis:
-  chunk_size: 30000
+  prompt_subtitle_noref: "addon-subtitle-noref.md"  # 视频号等无 Wiki 文稿场景
+  chunk_size: 12000
   prompt_subtitle: "addon-subtitle.md"
   prompt_discussion: "addon-discussion.md"
   prompt_digest: "addon-digest.md"
@@ -64,14 +101,48 @@ s5_analysis:
 llm_plan:
   # 各步骤当前使用的模型
   current_s4:
-    name: "minimax"
-    temperature: 0.2
+    name: "agentplan_seed21_lite"
+    temperature: 0.0
   current_s5:
-    name: "minimax"
-    temperature: 0.3
+    name: "agentplan_seed21_pro"
+    temperature: 0.1
   # LLM 模型调用接口
-  minimax:
-    model: "MiniMax-Text-01"
+  agentplan_seed21_lite:
+    model: "doubao-seed-2.1-lite"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 16384
+    thinking: "disabled"
+    structured_output: true
+    credential_source: "volcengine-agentplan"
+  agentplan_seed21_pro:
+    model: "doubao-seed-2.1-pro"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 32768
+    thinking: "disabled"
+    structured_output: true
+    credential_source: "volcengine-agentplan"
+  agentplan_deepseek_flash:
+    model: "deepseek-v4-flash"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 8192
+    credential_source: "volcengine-agentplan"
+  agentplan_deepseek_pro:
+    model: "deepseek-v4-pro"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 8192
+    credential_source: "volcengine-agentplan"
+  agentplan_glm_flash:
+    model: "glm-5.3-flash"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 8192
+    credential_source: "volcengine-agentplan"
+  agentplan_glm:
+    model: "glm-5.3"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 8192
+    credential_source: "volcengine-agentplan"
+  minimax:  #due-20260816
+    model: "MiniMax-M3"
     base_url: "https://api.minimax.chat/v1"
     max_tokens: 8192
   volcengine:

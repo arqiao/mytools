@@ -1,9 +1,17 @@
+# 参数调用示例:
+#   python src/s1w_zhihu.py
 """Step1-zhihu: 知乎训练营视频下载
 
-使用方式:
-  1. 浏览器打开视频页面，F12 → Network → 找到 .m3u8 请求
-  2. 右键 Copy as cURL → 粘贴到 config.yaml 的 source_url 字段
-  3. python src/s1_huifang.py
+用法:
+  # 通过 input.yaml 配置任务（source_type: "zhihu"）
+  python src/s1_huifang.py
+
+  # 直接运行（读取 input.yaml 中 zhihu 类型任务）
+  python src/s1w_zhihu.py
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "zhihu", source_huifang_url: 知乎训练营页面 URL
+  cfg/credentials.yaml — zhihu.browser_cookie
 
 流程:
   页面 URL → Playwright 捕获 m3u8 → ffmpeg 下载
@@ -541,7 +549,7 @@ def process_zhihu(task, config, creds):
             return
 
     # 4. 提取音频
-    extract_audio(video_path, OUTPUT_DIR / f"{base_name}.mp3")
+    extract_audio(video_path, OUTPUT_DIR / f"{base_name}.m4a")
     log.info(f"知乎训练营视频处理完成: {base_name}")
 
 

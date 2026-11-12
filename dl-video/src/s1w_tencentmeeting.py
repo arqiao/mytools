@@ -1,9 +1,20 @@
+# 参数调用示例:
+#   python src/s1w_tencentmeeting.py
 """Step1-tencentmeeting: 腾讯会议回放下载 — 逐字稿 + 纪要 + 时间轴
 
-使用方式:
-  1. 安装依赖: pip install playwright && playwright install chromium
-  2. config.yaml 中配置 source_type: "tencent_meeting"
-  3. python src/s1_huifang.py
+用法:
+  # 通过 input.yaml 配置任务（source_type: "tencent_meeting"）
+  python src/s1_huifang.py
+
+  # 直接运行（读取 input.yaml 中 tencent_meeting 类型任务）
+  python src/s1w_tencentmeeting.py
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "tencent_meeting", source_huifang_url: 腾讯会议回放 URL
+  cfg/credentials.yaml — tencent_meeting.cookie
+
+依赖:
+  pip install playwright && playwright install chromium
 """
 
 import logging
@@ -743,7 +754,7 @@ def process_tencent_meeting(task: dict, config: dict, creds: dict):
             download_video(video_url, video_path, cookies)
 
             # 从视频中提取音频
-            audio_path = OUTPUT_DIR / f"{filename}.mp3"
+            audio_path = OUTPUT_DIR / f"{filename}.m4a"
             extract_audio(video_path, audio_path)
 
         log.info("腾讯会议处理完成")

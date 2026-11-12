@@ -1,9 +1,45 @@
-"""字幕校订工具 - 基于逐字稿参考和 LLM 纠正 Whisper 字幕错误"""
+# 参数调用示例:
+#   python src/s4_srt_fix.py --subtitle <file.srt>
+#   python src/s4_srt_fix.py --subtitle <file.srt> --transcript <transcript.md>
+#   python src/s4_srt_fix.py --subtitle output/wx_demo.mlx_l3.srt --no-transcript
+#   python src/s4_srt_fix.py --subtitle output/demo.mlx_l3.srt --transcript output/demo_wiki.md
+#   python src/s4_srt_fix.py --subtitle <file.srt> --dict-only
+#   python src/s4_srt_fix.py --subtitle <file.srt> --dry-run
+#   python src/s4_srt_fix.py --subtitle <file.srt> --no-cache
+"""Step4: 字幕校订 — 基于逐字稿参考和 LLM 纠正 Whisper 字幕错误
+
+用法:
+  # 无参照校订（无逐字稿，LLM 仅凭上下文推断纠正）
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt
+
+  # 有参照校订（提供逐字稿，质量更高）
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt --transcript output/demo.md
+
+  # 逐字稿支持飞书 URL（自动下载为本地 .md 后使用）
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt --transcript https://xxx.feishu.cn/wiki/xxx
+
+  # 仅做词典替换，不调用 LLM
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt --dict-only
+
+  # 仅解析文件，不调用 LLM（调试用）
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt --dry-run
+
+  # 不使用断点缓存，强制重新调用 LLM
+  python src/s4_srt_fix.py --subtitle output/demo.mlx_turbo.srt --no-cache
+
+参数:
+  --subtitle PATH   字幕文件路径（支持相对/绝对路径，需含 .srt 后缀）
+  --transcript PATH 逐字稿路径或飞书 URL（可选，不传则无参照校订）
+  --dict-only       仅做自定义词典替换，不调用 LLM
+  --dry-run         仅解析文件，不调用 LLM
+  --no-cache        不使用断点缓存，强制重新调用 LLM
+"""
 
 import argparse
 import json
 import logging
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -11,12 +47,16 @@ import requests
 import yaml
 
 from modules.config_utils import load_config
+from modules.progress_utils import InlineProgress
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
 CFG_DIR = PROJECT_DIR / "cfg"
 PROMPT_DIR = PROJECT_DIR / "prompt"
-_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+try:
+    _input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+except yaml.YAMLError:
+    _input_cfg = {}
 LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
 OUTPUT_DIR = PROJECT_DIR / _input_cfg.get("path_output_dir", "output")
 LOG_DIR.mkdir(exist_ok=True)
@@ -117,8 +157,8 @@ def load_transcript(path_or_url, creds=None, srt_stem=""):
 
 def _srt_stem_to_base(srt_stem):
     """从 SRT 文件名中去掉模型后缀，得到内容基础名。
-    如 'AI落地Live_069_wm' → 'AI落地Live_069'"""
-    # 去掉最后一个 _ 及之后的部分（即模型后缀如 _wm）
+    如 'AI落地Live_069.wm' → 'AI落地Live_069'"""
+    # 去掉最后一个分隔符及之后的部分（即模型后缀如 .wm 或 _wm）
     if "_" in srt_stem:
         return srt_stem.rsplit("_", 1)[0]
     return srt_stem
@@ -126,7 +166,7 @@ def _srt_stem_to_base(srt_stem):
 
 def _download_feishu_to_md(url, srt_stem=""):
     """从飞书 URL 下载文档并保存为本地 MD 文件，返回 Path 或 None。
-    文件名与 SRT 内容名对齐：如 SRT 为 xxx_wm.srt，MD 为 xxx.md。
+    文件名与 SRT 内容名对齐：如 SRT 为 xxx.wm.srt，MD 为 xxx.md。
     若本地已存在同名 MD，直接复用不重复下载。"""
     import sys
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -218,6 +258,37 @@ def extract_terms_from_transcript(transcript_text):
 # LLM 客户端（与 addon 相同的 OpenAI 兼容接口）
 # ---------------------------------------------------------------------------
 
+S4_RESPONSE_SCHEMA = {
+    "name": "subtitle_fixes",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "seq": {"type": "integer"},
+                        "original": {"type": "string"},
+                        "fixed": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["seq", "original", "fixed", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    },
+}
+
+
+class LLMResponseError(RuntimeError):
+    """LLM 返回了 HTTP 成功但不可用的业务响应。"""
+
+
 class LLMClient:
     def __init__(self, config, creds):
         provider = config["llm_plan"]["current_s4"]["name"]
@@ -226,11 +297,18 @@ class LLMClient:
         self.base_url = llm_plan["base_url"].rstrip("/")
         self.max_tokens = llm_plan.get("max_tokens", 8192)
         self.temperature = config["llm_plan"]["current_s4"].get("temperature", 0.2)
+        self.thinking = llm_plan.get("thinking", "")
+        self.structured_output = llm_plan.get("structured_output", False)
         self.provider = provider
-        cred_block = creds.get(provider, {})
+        # 支持 credential_source 映射：当 provider 在 credentials 中无对应条目时，
+        # 从 credential_source 指定的 credentials 分组获取 api_key
+        cred_source = llm_plan.get("credential_source", provider)
+        cred_block = creds.get(cred_source, {})
         self.api_key = cred_block.get("api_key", "")
         if not self.api_key:
-            raise ValueError(f"未配置 {provider} 的 api_key")
+            raise ValueError(f"未配置 {cred_source} 的 api_key（provider={provider}）")
+        # 仅保留旧按量付费 volcengine 配置的 endpoint_id 兼容；
+        # Agent Plan 直接使用配置中的模型名。
         if provider == "volcengine":
             ep_id = cred_block.get("endpoint_id", "")
             if ep_id:
@@ -240,7 +318,7 @@ class LLMClient:
         self.total_output_tokens = 0
         log.info(f"LLM 客户端: provider={provider}, model={self.model}")
 
-    def chat(self, system_prompt, user_prompt, temperature=None):
+    def chat(self, system_prompt, user_prompt, temperature=None, response_schema=None):
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -253,9 +331,17 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "max_tokens": self.max_tokens,
-            "temperature": temperature or self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
         }
-        for attempt in range(3):
+        if self.thinking:
+            payload["thinking"] = {"type": self.thinking}
+        if response_schema and self.structured_output:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": response_schema,
+            }
+        for attempt in range(6):
+            wait = 10 * (2 ** min(attempt, 5))
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=300)
                 resp.raise_for_status()
@@ -264,11 +350,25 @@ class LLMClient:
                 self.total_calls += 1
                 self.total_input_tokens += usage.get("prompt_tokens", 0)
                 self.total_output_tokens += usage.get("completion_tokens", 0)
-                return data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                finish_reason = choice.get("finish_reason", "")
+                content = choice.get("message", {}).get("content") or ""
+                if finish_reason == "length":
+                    raise LLMResponseError(
+                        f"LLM 输出达到上限（max_tokens={self.max_tokens}）"
+                    )
+                if not content.strip():
+                    raise LLMResponseError(
+                        f"LLM 返回空 content（finish_reason={finish_reason or 'unknown'}）"
+                    )
+                return content
             except requests.exceptions.HTTPError:
                 if resp.status_code == 429:
-                    wait = 2 ** attempt * 5
                     log.warning(f"速率限制，等待 {wait}s...")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code >= 500:
+                    log.warning(f"服务端错误 {resp.status_code}，等待 {wait}s 后重试...")
                     time.sleep(wait)
                     continue
                 log.error(f"LLM 调用失败: {resp.status_code}, {resp.text}")
@@ -276,10 +376,12 @@ class LLMClient:
             except (requests.exceptions.ConnectionError,
                     requests.exceptions.ProxyError,
                     requests.exceptions.ReadTimeout) as e:
-                wait = 2 ** attempt * 10
-                log.warning(f"连接异常(attempt {attempt+1}/3)，等待 {wait}s 后重试: {e}")
+                remaining = 6 - attempt - 1
+                log.warning(f"连接异常(attempt {attempt+1}/6)，等待 {wait}s 后重试 ({remaining} 次剩余): {e}")
                 time.sleep(wait)
                 continue
+            except LLMResponseError:
+                raise
             except Exception as e:
                 log.error(f"LLM 调用异常: {e}")
                 raise
@@ -320,20 +422,44 @@ def apply_dict_fixes(entries, custom_dict):
 
 
 def parse_llm_json(reply):
-    """从 LLM 回复中提取 JSON 数组"""
+    """从 LLM 回复中提取 items；无效响应必须抛错，不能伪装成空结果。"""
+    if not reply or not reply.strip():
+        raise LLMResponseError("LLM 返回空文本")
     text = reply.strip()
     m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     if m:
         text = m.group(1).strip()
     try:
         data = json.loads(text)
-        return data if isinstance(data, list) else []
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"]
+        # 兼容旧模型和已有缓存格式。
+        if isinstance(data, list):
+            return data
+        raise LLMResponseError("LLM JSON 缺少 items 数组")
     except json.JSONDecodeError as e:
         log.error(f"JSON 解析失败: {e}")
-        dump_path = LOG_DIR / f"srtfix_raw_{int(time.time())}.txt"
+        dump_path = LOG_DIR / f"srtfix_raw_{time.time_ns()}.txt"
         dump_path.write_text(reply, encoding="utf-8")
         log.error(f"原始回复已保存: {dump_path}")
-        return []
+        raise LLMResponseError(f"LLM JSON 解析失败: {e}") from e
+
+
+def request_json_items(client, system_prompt, user_prompt, response_schema):
+    """请求结构化结果；业务响应错误额外重试一次。"""
+    for attempt in range(2):
+        try:
+            reply = client.chat(
+                system_prompt,
+                user_prompt,
+                response_schema=response_schema,
+            )
+            return parse_llm_json(reply)
+        except LLMResponseError as e:
+            if attempt == 0:
+                log.warning(f"LLM 结构化响应无效，立即重试一次: {e}")
+                continue
+            raise
 
 
 def build_user_prompt(chunk_entries, transcript_excerpt, terms, custom_dict):
@@ -413,6 +539,7 @@ def run_llm_fix(entries, transcript_text, terms, custom_dict, config, creds,
             cache = {}
 
     # 分段处理
+    progress = InlineProgress(log, interval_sec=5)
     for i in range(0, len(entries), chunk_size):
         chunk = entries[i:i + chunk_size]
         chunk_num = i // chunk_size + 1
@@ -422,23 +549,34 @@ def run_llm_fix(entries, transcript_text, terms, custom_dict, config, creds,
         # 断点续传：已有缓存则跳过
         if chunk_key in cache:
             fixes = cache[chunk_key]
-            log.info(f"LLM 校订: 段 {chunk_num}/{total_chunks} "
-                     f"(字幕 {chunk[0][0]}-{chunk[-1][0]}) [缓存] {len(fixes)} 条")
+            progress.update(
+                f"LLM 校订: 段 {chunk_num}/{total_chunks} "
+                f"(字幕 {chunk[0][0]}-{chunk[-1][0]}) [缓存] {len(fixes)} 条",
+                force=True,
+            )
             all_fixes.extend(fixes)
             continue
 
-        log.info(f"LLM 校订: 段 {chunk_num}/{total_chunks} "
-                 f"(字幕 {chunk[0][0]}-{chunk[-1][0]})")
+        progress.update(
+            f"LLM 校订: 段 {chunk_num}/{total_chunks} "
+            f"(字幕 {chunk[0][0]}-{chunk[-1][0]})",
+            force=True,
+        )
 
         excerpt = find_transcript_excerpt(transcript_text, chunk)
         user_prompt = build_user_prompt(chunk, excerpt, terms, custom_dict)
-        reply = client.chat(system_prompt, user_prompt)
-        fixes = parse_llm_json(reply)
+        fixes = request_json_items(
+            client, system_prompt, user_prompt, S4_RESPONSE_SCHEMA
+        )
         # 过滤无效条目：original == fixed 或缺少必要字段
         fixes = [f for f in fixes
                  if f.get("fixed") and f.get("original")
                  and f["fixed"].strip() != f["original"].strip()]
-        log.info(f"  段 {chunk_num} 返回 {len(fixes)} 条有效修正")
+        progress.update(
+            f"LLM 校订: 段 {chunk_num}/{total_chunks} 完成，"
+            f"返回 {len(fixes)} 条有效修正",
+            force=True,
+        )
         all_fixes.extend(fixes)
 
         # 实时写入缓存
@@ -448,6 +586,7 @@ def run_llm_fix(entries, transcript_text, terms, custom_dict, config, creds,
                 json.dumps(cache, ensure_ascii=False, indent=2),
                 encoding="utf-8")
 
+    progress.done()
     return all_fixes, client
 
 
@@ -510,11 +649,15 @@ def main():
                         help="覆盖配置中的字幕文件路径")
     parser.add_argument("--transcript", type=str, default="",
                         help="覆盖配置中的逐字稿路径/URL")
+    parser.add_argument("--no-transcript", action="store_true",
+                        help="无参照校订，忽略配置与自动关联的 Wiki（视频号使用）")
     parser.add_argument("--no-cache", action="store_true",
                         help="不使用断点缓存，强制重新调用 LLM")
     args = parser.parse_args()
+    if args.no_transcript and args.transcript:
+        parser.error("--no-transcript 与 --transcript 不能同时使用")
 
-    config, creds = load_config()
+    config, creds = load_config(include_input=not bool(args.subtitle))
     custom_dict = load_custom_dict(config)
 
     # 确定输入文件
@@ -533,7 +676,7 @@ def main():
                 break
     if not srt_path.exists():
         log.error(f"字幕文件不存在: {srt_path}")
-        return
+        sys.exit(1)
 
     # 验证后缀并自动关联 wiki 文档
     # 1. 读取 config.yaml 获取有效后缀列表
@@ -542,8 +685,16 @@ def main():
         import yaml as yaml2
         main_cfg = yaml2.safe_load(config_path.read_text(encoding="utf-8"))
         valid_suffixes = list(main_cfg.get("s3_engine_suffix", {}).values())
+        valid_suffixes += [
+            "_ori", "_wm", "_wl", "_ws", "_wt",
+            "_xunfei", "_aliyun", "_doubao", "_feishu", "_tencent",
+        ]
     else:
-        valid_suffixes = ["_wm", "_wl", "_ws", "_wt", "_xunfei", "_aliyun", "_doubao", "_feishu", "_tencent"]
+        valid_suffixes = [".wm", ".wl", ".ws", ".wt", ".mlx_turbo", ".mlx_l3",
+                          ".mlx_m", ".mlx_s", ".mlx_t", ".xunfei", ".aliyun",
+                          ".doubao", ".feishu", ".tencent",
+                          "_ori", "_wm", "_wl", "_ws", "_wt", "_xunfei", "_aliyun",
+                          "_doubao", "_feishu", "_tencent"]
 
     # 2. 检查文件名后缀是否在列表中
     stem = srt_path.stem
@@ -556,7 +707,7 @@ def main():
     if matched_suffix is None:
         log.error(f"字幕文件后缀不在有效列表中: {srt_path.name}")
         log.error(f"有效后缀: {valid_suffixes}")
-        return
+        sys.exit(1)
 
     # 3. 查找对应的 wiki 文档
     base_name = stem[:-len(matched_suffix)]  # 去掉后缀得到基础名
@@ -567,7 +718,9 @@ def main():
 
     # 4. 加载逐字稿（优先级：用户指定 > wiki 文档 > 无参照）
     transcript_text = ""
-    if wiki_path.exists():
+    if args.no_transcript:
+        log.info("无文稿模式：仅根据字幕与词典校订")
+    elif wiki_path.exists():
         # 自动关联 wiki 文档
         transcript_text = wiki_path.read_text(encoding="utf-8")
         log.info(f"自动关联教学文档: {wiki_path.name} ({len(transcript_text)} 字符)")

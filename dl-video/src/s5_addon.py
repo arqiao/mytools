@@ -1,4 +1,55 @@
-"""逐字稿信息拓展工具 - 从字幕和讨论区中挖掘逐字稿遗漏的信息"""
+# 参数调用示例:
+#   python src/s5_addon.py --subtitle <file_fix.srt>
+#   python src/s5_addon.py --subtitle output/wx_demo.qwen3_asr.srt --no-transcript --subtitle-only --no-prefer-fix
+#   python src/s5_addon.py --subtitle <file_fix.srt> --transcript <wiki.md> --discussion <chat.xlsx>
+#   python src/s5_addon.py --subtitle output/demo.qwen3_asr.srt --no-prefer-fix --transcript output/demo_wiki.md
+#   python src/s5_addon.py --subtitle <file_fix.srt> --subtitle-only
+#   python src/s5_addon.py --subtitle <file_fix.srt> --discussion <chat.xlsx> --discussion-only
+#   python src/s5_addon.py --subtitle <file_fix.srt> --no-digest
+#   python src/s5_addon.py --subtitle <file_fix.srt> --provider minimax
+#   python src/s5_addon.py --subtitle <file_fix.srt> --dry-run
+"""Step5: 逐字稿信息拓展 — 从字幕和讨论区中挖掘逐字稿遗漏的信息
+
+用法:
+  # 完整运行（字幕分析 + 讨论区分析 + 精华摘要）
+  python src/s5_addon.py --subtitle output/demo_fix.srt
+
+  # 指定逐字稿和讨论区
+  python src/s5_addon.py --subtitle output/demo_fix.srt --transcript output/demo.md --discussion output/demo_讨论.xlsx
+
+  # 直接使用 Qwen3-ASR 原始字幕，不自动切换到同名 _fix.srt
+  python src/s5_addon.py --subtitle output/demo.qwen3_asr.srt --no-prefer-fix --transcript output/demo_wiki.md
+
+  # 逐字稿支持飞书 URL
+  python src/s5_addon.py --subtitle output/demo_fix.srt --transcript https://xxx.feishu.cn/wiki/xxx
+
+  # 仅分析字幕（跳过讨论区）
+  python src/s5_addon.py --subtitle output/demo_fix.srt --subtitle-only
+
+  # 仅分析讨论区（跳过字幕）
+  python src/s5_addon.py --subtitle output/demo_fix.srt --discussion output/demo_讨论.xlsx --discussion-only
+
+  # 跳过精华摘要生成
+  python src/s5_addon.py --subtitle output/demo_fix.srt --no-digest
+
+  # 覆盖 LLM 提供商
+  python src/s5_addon.py --subtitle output/demo_fix.srt --provider minimax
+
+  # 试运行（只解析文件，不调用 LLM）
+  python src/s5_addon.py --subtitle output/demo_fix.srt --dry-run
+
+参数:
+  --subtitle PATH     字幕文件路径（支持相对/绝对路径）
+  --no-prefer-fix     直接使用指定字幕，不自动切换到同名 _fix.srt
+  --no-transcript     无 Wiki 模式，直接从字幕提取要点与摘要
+  --transcript PATH   逐字稿/教学文档路径或飞书 URL（可选）
+  --discussion PATH   讨论区 .xlsx 文件路径（可选）
+  --subtitle-only     仅分析字幕（跳过讨论区）
+  --discussion-only   仅分析讨论区（跳过字幕）
+  --no-digest         跳过精华摘要生成
+  --provider NAME     覆盖配置中的 LLM 提供商（如 minimax / volcengine / dashscope / deepseek）
+  --dry-run           试运行：只解析文件，不调用 LLM
+"""
 
 import argparse
 import json
@@ -12,6 +63,7 @@ import yaml
 from openpyxl import load_workbook
 
 from modules.config_utils import load_config
+from modules.progress_utils import InlineProgress
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
@@ -114,6 +166,86 @@ def parse_transcript(filepath):
 # LLM 调用层（OpenAI 兼容接口，支持 minimax/volcengine/dashscope/deepseek）
 # ---------------------------------------------------------------------------
 
+S5_SUBTITLE_RESPONSE_SCHEMA = {
+    "name": "subtitle_additions",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chapter": {"type": "string"},
+                        "category": {
+                            "type": "string",
+                            "enum": ["观点", "金句", "数字细节", "扩展案例", "方法论框架", "互动问答", "推荐资源"],
+                        },
+                        "time": {"type": "string"},
+                        "content": {"type": "string"},
+                        "context": {"type": "string"},
+                        "correction": {"type": "string"},
+                    },
+                    "required": ["chapter", "category", "time", "content", "context", "correction"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    },
+}
+
+S5_DISCUSSION_RESPONSE_SCHEMA = {
+    "name": "discussion_insights",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chapter": {"type": "string"},
+                        "category": {
+                            "type": "string",
+                            "enum": ["独立观点", "补充信息", "有价值问答", "推荐资源", "实践经验", "热议话题"],
+                        },
+                        "time": {"type": "string"},
+                        "speaker": {"type": "string"},
+                        "tags": {"type": "string"},
+                        "content": {"type": "string"},
+                        "thread": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "time": {"type": "string"},
+                                    "speaker": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["time", "speaker", "content"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    },
+                    "required": ["chapter", "category", "time", "speaker", "tags", "content", "thread"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    },
+}
+
+
+class LLMResponseError(RuntimeError):
+    """LLM 返回了 HTTP 成功但不可用的业务响应。"""
+
+
 class LLMClient:
     """统一的 LLM 调用客户端，基于 OpenAI 兼容的 chat/completions 接口"""
 
@@ -124,15 +256,19 @@ class LLMClient:
         self.base_url = llm_plan["base_url"].rstrip("/")
         self.max_tokens = llm_plan.get("max_tokens", 8192)
         self.temperature = config["llm_plan"]["current_s5"].get("temperature", 0.3)
+        self.thinking = llm_plan.get("thinking", "")
+        self.structured_output = llm_plan.get("structured_output", False)
         self.provider = provider
 
-        # 获取 API key
-        cred_block = creds.get(provider, {})
+        # 支持 credential_source 映射：当 provider 在 credentials 中无对应条目时，
+        # 从 credential_source 指定的 credentials 分组获取 api_key
+        cred_source = llm_plan.get("credential_source", provider)
+        cred_block = creds.get(cred_source, {})
         self.api_key = cred_block.get("api_key", "")
         if not self.api_key:
-            raise ValueError(f"未配置 {provider} 的 api_key，请检查 credentials.yaml")
+            raise ValueError(f"未配置 {cred_source} 的 api_key（provider={provider}）")
 
-        # 火山方舟用 endpoint_id 作为 model
+        # 仅旧按量付费 volcengine 配置使用 endpoint_id；Agent Plan 直接使用模型名。
         if provider == "volcengine":
             ep_id = cred_block.get("endpoint_id", "")
             if ep_id:
@@ -144,7 +280,7 @@ class LLMClient:
         self.total_output_tokens = 0
         log.info(f"LLM 客户端初始化: provider={provider}, model={self.model}")
 
-    def chat(self, system_prompt, user_prompt, temperature=None):
+    def chat(self, system_prompt, user_prompt, temperature=None, response_schema=None):
         """发送 chat 请求，返回助手回复文本"""
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -158,10 +294,18 @@ class LLMClient:
                 {"role": "user", "content": user_prompt},
             ],
             "max_tokens": self.max_tokens,
-            "temperature": temperature or self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
         }
+        if self.thinking:
+            payload["thinking"] = {"type": self.thinking}
+        if response_schema and self.structured_output:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": response_schema,
+            }
 
-        for attempt in range(3):
+        for attempt in range(6):
+            wait = 10 * (2 ** min(attempt, 5))
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=300)
                 resp.raise_for_status()
@@ -171,23 +315,35 @@ class LLMClient:
                 self.total_calls += 1
                 self.total_input_tokens += usage.get("prompt_tokens", 0)
                 self.total_output_tokens += usage.get("completion_tokens", 0)
-                reply = data["choices"][0]["message"]["content"]
-                return reply
+                choice = data["choices"][0]
+                finish_reason = choice.get("finish_reason", "")
+                content = choice.get("message", {}).get("content") or ""
+                if finish_reason == "length":
+                    raise LLMResponseError(
+                        f"LLM 输出达到上限（max_tokens={self.max_tokens}）"
+                    )
+                if not content.strip():
+                    raise LLMResponseError(
+                        f"LLM 返回空 content（finish_reason={finish_reason or 'unknown'}）"
+                    )
+                return content
             except requests.exceptions.HTTPError as e:
                 if resp.status_code == 429:
-                    wait = 2 ** attempt * 5
                     log.warning(f"速率限制，等待 {wait}s 后重试...")
+                    time.sleep(wait)
+                    continue
+                if resp.status_code >= 500:
+                    log.warning(f"服务端错误 {resp.status_code}，等待 {wait}s 后重试...")
                     time.sleep(wait)
                     continue
                 log.error(f"LLM 调用失败: {e}, 响应: {resp.text}")
                 raise
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-                if attempt < 2:
-                    wait = 2 ** attempt * 10
-                    log.warning(f"LLM 调用超时/连接错误，等待 {wait}s 后重试 ({attempt+1}/3)...")
-                    time.sleep(wait)
-                    continue
-                log.error(f"LLM 调用超时，重试耗尽: {e}")
+                remaining = 6 - attempt - 1
+                log.warning(f"LLM 调用超时/连接错误，等待 {wait}s 后重试 ({attempt+1}/6, {remaining} 次剩余): {e}")
+                time.sleep(wait)
+                continue
+            except LLMResponseError:
                 raise
             except Exception as e:
                 log.error(f"LLM 调用异常: {e}")
@@ -221,8 +377,9 @@ def load_prompt(filename):
 # ---------------------------------------------------------------------------
 
 def parse_llm_json(reply):
-    """从 LLM 回复中提取 JSON 数组。
-    处理 markdown code fence 包裹的情况，解析失败返回空列表。"""
+    """从 LLM 回复中提取 items；无效响应必须抛错。"""
+    if not reply or not reply.strip():
+        raise LLMResponseError("LLM 返回空文本")
     text = reply.strip()
     # 尝试提取 code fence 中的 JSON
     m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
@@ -230,17 +387,36 @@ def parse_llm_json(reply):
         text = m.group(1).strip()
     try:
         data = json.loads(text)
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data["items"]
+        # 兼容旧模型返回的顶层数组。
         if isinstance(data, list):
             return data
-        log.warning("LLM 返回的 JSON 不是数组，忽略")
-        return []
+        raise LLMResponseError("LLM JSON 缺少 items 数组")
     except json.JSONDecodeError as e:
         log.error(f"JSON 解析失败: {e}")
         # 保存原始回复到日志目录便于排查
-        dump_path = LOG_DIR / f"llm_raw_{int(time.time())}.txt"
+        dump_path = LOG_DIR / f"llm_raw_{time.time_ns()}.txt"
         dump_path.write_text(reply, encoding="utf-8")
         log.error(f"原始回复已保存: {dump_path}")
-        return []
+        raise LLMResponseError(f"LLM JSON 解析失败: {e}") from e
+
+
+def request_json_items(client, system_prompt, user_prompt, response_schema):
+    """请求结构化结果；业务响应错误额外重试一次。"""
+    for attempt in range(2):
+        try:
+            reply = client.chat(
+                system_prompt,
+                user_prompt,
+                response_schema=response_schema,
+            )
+            return parse_llm_json(reply)
+        except LLMResponseError as e:
+            if attempt == 0:
+                log.warning(f"LLM 结构化响应无效，立即重试一次: {e}")
+                continue
+            raise
 
 
 def merge_results(subtitle_items, discussion_items, sections):
@@ -346,16 +522,19 @@ def _is_similar(a, b, threshold=0.6):
     return (intersection / union) >= threshold
 
 
-def render_full_report(merged, stats, sections, prefix, output_path):
+def render_full_report(merged, stats, sections, prefix, output_path, no_transcript=False):
     """渲染完整版信息拓展 markdown 报告"""
     lines = []
     lines.append(f"# {prefix} — 信息拓展\n")
+    subtitle_label = "字幕要点" if no_transcript else "字幕补充"
+    if no_transcript:
+        lines.append("> 基于视频字幕整理，未使用独立 Wiki 文稿。\n")
 
     # 摘要仪表盘
     lines.append("## 摘要统计\n")
     total = stats["total_subtitle"] + stats["total_discussion"]
     lines.append(f"- 提取信息总计：**{total}** 条")
-    lines.append(f"  - 字幕补充：{stats['total_subtitle']} 条")
+    lines.append(f"  - {subtitle_label}：{stats['total_subtitle']} 条")
     lines.append(f"  - 讨论区精华：{stats['total_discussion']} 条")
     if stats["subtitle_categories"]:
         cats = "、".join(f"{k}({v})" for k, v in stats["subtitle_categories"].items())
@@ -366,6 +545,9 @@ def render_full_report(merged, stats, sections, prefix, output_path):
     if stats["top_chapters"]:
         top = "、".join(f"{t}({n}条)" for t, n in stats["top_chapters"][:3])
         lines.append(f"  - 信息密度最高：{top}")
+    if total == 0:
+        empty_label = "信息" if no_transcript else "增量信息"
+        lines.append(f"\n> 所有输入分段均处理成功，但未发现可提取的{empty_label}。")
     lines.append("")
 
     # 按章节输出
@@ -379,7 +561,7 @@ def render_full_report(merged, stats, sections, prefix, output_path):
         lines.append(f"## {title}\n")
 
         if sub_items:
-            lines.append("### 字幕补充\n")
+            lines.append(f"### {subtitle_label}\n")
             _render_subtitle_items(sub_items, lines)
             lines.append("")
 
@@ -520,8 +702,12 @@ def main():
                         help="覆盖配置中的 LLM 提供商")
     parser.add_argument("--subtitle", type=str, default="",
                         help="字幕文件路径")
+    parser.add_argument("--no-prefer-fix", action="store_true",
+                        help="直接使用指定字幕，不自动切换到同名 _fix.srt")
     parser.add_argument("--transcript", type=str, default="",
                         help="逐字稿/教学文档路径")
+    parser.add_argument("--no-transcript", action="store_true",
+                        help="无文稿模式：忽略 Wiki，直接从字幕提取信息（视频号使用）")
     parser.add_argument("--discussion", type=str, default="",
                         help="讨论区 xlsx 路径")
     parser.add_argument("--subtitle-only", action="store_true",
@@ -531,6 +717,8 @@ def main():
     parser.add_argument("--no-digest", action="store_true",
                         help="跳过精华摘要生成")
     args = parser.parse_args()
+    if args.no_transcript and (args.transcript or args.discussion_only):
+        parser.error("--no-transcript 不能与 --transcript 或 --discussion-only 同时使用")
 
     config, creds = load_config()
 
@@ -543,6 +731,10 @@ def main():
     subtitle_path = args.subtitle or inputs.get("subtitle", "")
     transcript_src = args.transcript or inputs.get("transcript", "")
     discussion_path = args.discussion or inputs.get("discussion", "")
+    if args.no_transcript:
+        transcript_src = ""
+    if args.subtitle_only:
+        discussion_path = ""
 
     # 相对路径基于 output 目录
     base_dir = PROJECT_DIR / config.get("path_output_dir", "output").rstrip("/")
@@ -570,7 +762,10 @@ def main():
             main_cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             valid_suffixes = list(main_cfg.get("s3_engine_suffix", {}).values())
         else:
-            valid_suffixes = ["_wm", "_wl", "_ws", "_wt", "_xunfei", "_aliyun",
+            valid_suffixes = [".wm", ".wl", ".ws", ".wt", ".mlx_turbo", ".mlx_l3",
+                              ".mlx_m", ".mlx_s", ".mlx_t", ".xunfei", ".aliyun",
+                              ".doubao", ".feishu", ".tencent",
+                              "_wm", "_wl", "_ws", "_wt", "_xunfei", "_aliyun",
                               "_doubao", "_feishu", "_tencent"]
 
         stem = Path(subtitle_path).stem
@@ -579,7 +774,7 @@ def main():
             if stem.endswith(sfx):
                 matched_suffix = sfx
                 break
-        # 也支持 _fix 后缀（如 _wm_fix）
+        # 也支持 _fix 后缀（如 .wm_fix、_wm_fix）
         if matched_suffix is None:
             for sfx in valid_suffixes:
                 if f"{sfx}_fix" in stem:
@@ -589,7 +784,7 @@ def main():
         if matched_suffix:
             base_name = stem[:-len(matched_suffix)]
             # 自动关联 wiki 文档
-            if not transcript_src:
+            if not transcript_src and not args.no_transcript:
                 wiki_path = Path(subtitle_path).parent / f"{base_name}_wiki.md"
                 if not wiki_path.exists():
                     wiki_path = OUTPUT_DIR / f"{base_name}_wiki.md"
@@ -600,7 +795,7 @@ def main():
                     log.warning(f"未找到教学文档: {base_name}_wiki.md")
 
     # 优先使用 _fix 版本的字幕
-    if subtitle_path:
+    if subtitle_path and not args.no_prefer_fix:
         sp = Path(subtitle_path)
         fix_path = sp.parent / f"{sp.stem}_fix{sp.suffix}"
         if fix_path.exists():
@@ -609,19 +804,21 @@ def main():
 
     # 确定逐字稿来源
     transcript_path = transcript_src or transcript_from_wiki
-    if not transcript_path:
-        log.error("未配置逐字稿来源，且未找到关联的 wiki 文档")
-        return
+    if not transcript_path and not args.no_transcript:
+        raise FileNotFoundError("未配置逐字稿来源，且未找到关联的 wiki 文档")
 
     # 解析逐字稿
-    tp = Path(transcript_path)
-    if not tp.is_absolute():
-        tp = base_dir / transcript_path
-    if not tp.exists():
-        log.error(f"逐字稿文件不存在: {tp}")
-        return
-    log.info(f"逐字稿来源: 本地文件 {tp}")
-    sections = parse_transcript(str(tp))
+    if args.no_transcript:
+        sections = [("视频内容", "")]
+        log.info("无文稿模式：直接提取字幕信息，不作 Wiki 增量对比")
+    else:
+        tp = Path(transcript_path)
+        if not tp.is_absolute() and not tp.exists():
+            tp = base_dir / transcript_path
+        if not tp.exists():
+            raise FileNotFoundError(f"逐字稿文件不存在: {tp}")
+        log.info(f"逐字稿来源: 本地文件 {tp}")
+        sections = parse_transcript(str(tp))
 
     section_titles = [t for t, _ in sections]
     log.info(f"章节列表: {section_titles}")
@@ -633,6 +830,8 @@ def main():
         log.info(f"字幕文本总长: {sum(len(e[3]) for e in srt_entries)} 字符")
     elif not args.discussion_only:
         log.warning(f"字幕文件不存在或未配置: {subtitle_path}")
+    if args.no_transcript and not srt_entries:
+        raise ValueError("无文稿模式需要有效且非空的字幕文件")
 
     # 解析讨论区
     discussions = []
@@ -648,10 +847,15 @@ def main():
         log.info(f"讨论区: {len(discussions)} 条发言")
         return
 
+    if not srt_entries and not discussions:
+        raise ValueError("没有可供 S5 分析的字幕或讨论区内容")
+
     # 初始化 LLM 客户端
     llm = LLMClient(config, creds)
     analysis_cfg = config.get("s5_analysis", {})
-    prompt_subtitle = load_prompt(analysis_cfg.get("prompt_subtitle", "addon-subtitle.md"))
+    prompt_subtitle = load_prompt(
+        analysis_cfg.get("prompt_subtitle_noref", "addon-subtitle-noref.md") if args.no_transcript
+        else analysis_cfg.get("prompt_subtitle", "addon-subtitle.md"))
     prompt_discussion = load_prompt(analysis_cfg.get("prompt_discussion", "addon-discussion.md"))
     chunk_size = analysis_cfg.get("chunk_size", 30000)
     # 输出目录跟随输入文件所在目录
@@ -671,9 +875,14 @@ def main():
     prefix = config.get("output", {}).get("s5", {}).get("fnprefix", "")
     if not prefix:
         if subtitle_path and Path(subtitle_path).exists():
-            # 去掉 _wm 后缀，如 AI落地Live_069_wm.srt → AI落地Live_069
+            # 去掉常见 s3 后缀，如 AI落地Live_069.wm.srt → AI落地Live_069
             stem = Path(subtitle_path).stem
-            prefix = re.sub(r"_wm$", "", stem)
+            suffixes = valid_suffixes if "valid_suffixes" in locals() else [".wm", "_wm"]
+            for sfx in sorted([s + "_fix" for s in suffixes] + suffixes, key=len, reverse=True):
+                if stem.endswith(sfx):
+                    stem = stem[:-len(sfx)]
+                    break
+            prefix = stem
         elif discussion_path and Path(discussion_path).exists():
             prefix = Path(discussion_path).stem
         elif transcript_path:
@@ -684,27 +893,42 @@ def main():
     # ── 字幕对比分析 ──
     subtitle_items = []
     if srt_entries and not args.discussion_only:
-        log.info("=== 开始字幕对比分析 ===")
+        log.info("=== 开始字幕%s分析 ===", "要点" if args.no_transcript else "对比")
         transcript_text = "\n\n".join(
             f"## {title}\n{content}" for title, content in sections
         )
         chunks = chunk_srt_text(srt_entries, chunk_size)
         log.info(f"字幕分为 {len(chunks)} 段")
 
+        subtitle_progress = InlineProgress(log, interval_sec=5)
         for i, (start, end, chunk_text) in enumerate(chunks):
-            log.info(f"  分析字幕段 {i+1}/{len(chunks)}: {start} ~ {end}")
+            subtitle_progress.update(
+                f"字幕对比分析: {i + 1}/{len(chunks)} 段 ({start} ~ {end})",
+                force=True,
+            )
             user_prompt = (
                 f"## 逐字稿内容\n\n{transcript_text}\n\n"
                 f"---\n\n"
                 f"## 字幕原文（{start} ~ {end}）\n\n{chunk_text}"
             )
+            if args.no_transcript:
+                user_prompt = f"## 视频字幕（{start} ~ {end}）\n\n{chunk_text}"
             try:
-                reply = llm.chat(prompt_subtitle, user_prompt)
-                items = parse_llm_json(reply)
-                subtitle_items.extend(items)
-                log.info(f"    提取 {len(items)} 条信息")
+                items = request_json_items(
+                    llm,
+                    prompt_subtitle,
+                    user_prompt,
+                    S5_SUBTITLE_RESPONSE_SCHEMA,
+                )
             except Exception as e:
-                log.error(f"    字幕段 {i+1} 处理失败，跳过: {e}")
+                raise RuntimeError(f"字幕段 {i+1} 处理失败: {e}") from e
+            subtitle_items.extend(items)
+            subtitle_progress.update(
+                f"字幕对比分析: {i + 1}/{len(chunks)} 段完成，"
+                f"提取 {len(items)} 条信息",
+                force=True,
+            )
+        subtitle_progress.done()
 
         log.info(f"字幕对比分析完成，共提取 {len(subtitle_items)} 条")
 
@@ -724,34 +948,48 @@ def main():
         disc_chunks = chunk_discussions(discussions, chunk_size)
         log.info(f"讨论区分为 {len(disc_chunks)} 段")
 
+        discussion_progress = InlineProgress(log, interval_sec=5)
         for i, chunk_text in enumerate(disc_chunks):
-            log.info(f"  分析讨论区段 {i+1}/{len(disc_chunks)}")
+            discussion_progress.update(
+                f"讨论区分析: {i + 1}/{len(disc_chunks)} 段",
+                force=True,
+            )
             user_prompt = (
                 f"## 逐字稿章节（标题 + 摘要）\n\n{section_list}\n\n"
                 f"---\n\n"
                 f"## 讨论区发言记录（第 {i+1}/{len(disc_chunks)} 段）\n\n{chunk_text}"
             )
             try:
-                reply = llm.chat(prompt_discussion, user_prompt)
-                items = parse_llm_json(reply)
-                discussion_items.extend(items)
-                log.info(f"    提取 {len(items)} 条信息")
+                items = request_json_items(
+                    llm,
+                    prompt_discussion,
+                    user_prompt,
+                    S5_DISCUSSION_RESPONSE_SCHEMA,
+                )
             except Exception as e:
-                log.error(f"    讨论区段 {i+1} 处理失败，跳过: {e}")
+                raise RuntimeError(f"讨论区段 {i+1} 处理失败: {e}") from e
+            discussion_items.extend(items)
+            discussion_progress.update(
+                f"讨论区分析: {i + 1}/{len(disc_chunks)} 段完成，"
+                f"提取 {len(items)} 条信息",
+                force=True,
+            )
+        discussion_progress.done()
 
         log.info(f"讨论区分析完成，共提取 {len(discussion_items)} 条")
 
     # ── 合并与渲染 ──
-    if subtitle_items or discussion_items:
-        merged, stats = merge_results(subtitle_items, discussion_items, sections)
-        report_path = output_dir / f"{prefix}_信息拓展.md"
-        report_content = render_full_report(
-            merged, stats, sections, prefix, report_path
-        )
+    merged, stats = merge_results(subtitle_items, discussion_items, sections)
+    report_path = output_dir / f"{prefix}_信息拓展.md"
+    report_content = render_full_report(
+        merged, stats, sections, prefix, report_path, no_transcript=args.no_transcript
+    )
 
-        # ── 精华摘要 ──
-        if not args.no_digest:
-            log.info("=== 生成精华摘要 ===")
+    # ── 精华摘要 ──
+    if not args.no_digest:
+        log.info("=== 生成精华摘要 ===")
+        digest_path = output_dir / f"{prefix}_精华摘要.md"
+        if subtitle_items or discussion_items:
             prompt_digest = load_prompt(
                 analysis_cfg.get("prompt_digest", "addon-digest.md")
             )
@@ -761,9 +999,11 @@ def main():
                 r"^```(?:markdown)?\s*\n(.*)\n```\s*$", r"\1",
                 digest_reply.strip(), flags=re.DOTALL,
             )
-            digest_path = output_dir / f"{prefix}_精华摘要.md"
-            digest_path.write_text(digest_text, encoding="utf-8")
-            log.info(f"精华摘要输出: {digest_path}")
+        else:
+            empty_label = "信息" if args.no_transcript else "增量信息"
+            digest_text = f"# 精华摘要：{prefix}\n\n未发现可提取的{empty_label}。\n"
+        digest_path.write_text(digest_text, encoding="utf-8")
+        log.info(f"精华摘要输出: {digest_path}")
 
     llm.report_usage()
     log.info("完成")

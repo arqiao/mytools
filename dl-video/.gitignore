@@ -1,13 +1,26 @@
 # 输出文件
 output/
+out-yitang/
+out-wechat/
 log-err/
+temp_images/
 
 # 凭证
 cfg/credentials.yaml
+cfg/credentials.yaml.*
+.env
+.env.*
+!.env.example
+# 本机任务含课程/文档链接；仓库提供 example 配置
+cfg/input.yaml
+cfg/whisper_speed.json
 
 # 临时文件
 tmp/
-.browser_data/
+.browser_data*/
+.progress_*.json
+node_modules/
+.DS_Store
 api_response.json
 page_full.html
 

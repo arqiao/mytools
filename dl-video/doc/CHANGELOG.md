@@ -2,6 +2,84 @@
 
 按时间倒序排列，基于 git log 整理。
 
+## 2026-11
+
+### 2026-11-12 docs: 同步实际流程与交付说明
+- 修正视频号指南中 Qwen3-ASR 跳过 S4 的旧说明，补充仅下载与 ASR 的运行方式。
+- 补充 Qwen3-ASR 的依赖、模型缓存、独立入口参数，以及独立 S3 与流水线的默认引擎区别。
+- 记录已完成批次的单字幕整理、时间轴校正和发布时间不可获取的验证边界，区分批次整理与通用 CLI 行为。
+- 更新集中认证入口，增加项目首页及通用任务示例；Git 忽略视频号/一堂产物、浏览器登录态、个人任务与缓存。
+
+### 2026-11-07 fix: 视频号统一使用独立输出目录
+- 新增 `path_wechat_dir`，默认 `out-wechat/`；视频号独立 S1、下载调度器和全流程使用同一目录规则，后续字幕与报告跟随输入文件保存。
+- 更新示例配置和使用文档；其他平台仍沿用原输出目录，独立 S1 的 `--output-dir` 可覆盖视频号目录。
+
+### 2026-11-06 feat: 微信视频号独立下载与全流程
+- S1 改用元宝 `wx_export_id → findergetobjecturl`，提供独立 URL/配置 CLI，移除强制微信绑定检查。
+- 保留完整媒体签名但不输出至日志；下载检查字节数、MP4 结构、媒体流与时长，默认完整解码；音频提取失败不交付成功清单。
+- 流水线新增 `--wechat-url` 及元宝浏览器参数，自动跳过 S2，以分享 ID 和本轮下载清单精确接续音频。
+- S4/S5 支持 `--no-transcript`；S5 增加无文稿提示词，视频号直接从字幕提取信息并生成摘要。
+- 新增视频号示例配置、完整操作指南及离线回归测试；后续已统一恢复执行 S4。
+
+### fix: s4/s5 Agent Plan 结构化输出与失败判定
+- s4 切换到 `doubao-seed-2.1-lite`，s5 切换到 `doubao-seed-2.1-pro`
+- Agent Plan 请求显式关闭深度思考，避免思维链耗尽输出额度
+- s4/s5 使用 JSON Schema 约束结构化结果，同时兼容旧的顶层数组响应
+- Qwen3-ASR 流程恢复执行 s4，s5 使用生成的 `.qwen3_asr_fix.srt`
+- 空 `content`、输出截断和非法 JSON 不再按空结果继续，重试后仍失败则以非零状态退出
+- s5 分段从 30000 字符缩小为 12000 字符，降低单次输出被截断的概率
+- s5 在所有分段成功但无增量信息时仍生成明确的结果文件
+- 流水线新增 `--video-file` 参数；已有原始视频时直接从 s3 开始，不再生成同名的持久化音频文件，s3 仅使用并清理临时 WAV
+
+## 2026-08
+
+### feat: s2_wiki 新增 --attachments-only 模式，支持飞书页面内嵌妙记视频下载
+- `s2_wiki.py` 新增 `--attachments-only` 参数，只下载附件（视频、音频、PDF 等），不下载全文
+- 附件模式复用 `s2w_yitang_wiki.py` 的 `_download_attachments` 方法，扩展支持 type=26（iframe 飞书妙记视频）
+- `_feishu_attr_key` 映射新增 `26: ["iframe"]`，保留 iframe 数据
+- 新增 `_download_iframe_video` 方法：解析 iframe URL 中的妙记 token，通过 `get_minutes_media` 获取视频 URL，调用 `download_video` 下载
+- 视频下载 cookie 优先使用本机活跃的飞书登录态（`_local_feishu_cookie_header`），兜底 credentials.yaml
+- `download_video` 新增可选 `referer` 参数，支持不同飞书租户域名
+
+### feat: s3_subtitle 支持视频文件输入
+- `s3_subtitle.py` 的位置参数从音频文件扩展为媒体文件，支持 `.mp4`、`.mov`、`.mkv`、`.webm`、`.ts` 等常见视频格式
+- 视频输入会先提取音频轨道并转为本机临时 16kHz WAV，再进入 Whisper 或云端 ASR 流程
+- 字幕输出仍基于原始媒体文件名，例如 `demo.mp4` 输出 `demo.mlx_l3.srt`
+
+## 2026-05
+
+### feat: 新增 pyannote 说话人标注后处理
+- 新增 `src/s3_speaker.py`，读取已有 SRT 和音频，输出 `.speaker.srt`
+- 使用 pyannote speaker diarization，对每条字幕按最大时间重叠匹配说话人
+- 保留 pyannote 原始标签，输出形式为 `[SPEAKER_00] 字幕内容`
+
+### feat: Mac Apple Silicon 支持 MLX Whisper 后端
+- `s3_subtitle.py` 新增 `--backend auto|mlx|faster-whisper`
+- Apple Silicon Mac 默认使用 `mlx + large-v3-turbo`
+- MLX 输出后缀改为点号形式：`.mlx_turbo.srt`、`.mlx_l3.srt`
+- 保留 faster-whisper 作为非 Mac 和 fallback 路径
+
+### feat: model_downloader 支持 MLX 模型预下载
+- `src/tools/model_downloader.py` 新增 `--backend faster-whisper|mlx|all`
+- 支持下载和列出 `large-v3-turbo`、`large-v3` 等 MLX 模型
+- s3 的 MLX 路径不再转写时隐式下载模型；缺模型时提示具体下载命令
+- 默认使用 `HF_ENDPOINT=https://hf-mirror.com`，支持通过环境变量或 `--mirror` 改用官方源
+
+### fix: run_pipeline 支持 MLX 字幕后缀
+- 流水线从 `config.yaml` 的 `s3_engine_suffix` 读取有效字幕后缀
+- s4 自动识别 `.mlx_turbo.srt`、`.mlx_l3.srt` 等 MLX 输出
+
+### change: s3 字幕输出后缀统一为点号形式
+- faster-whisper 输出从 `_wm.srt` / `_wl.srt` 改为 `.wm.srt` / `.wl.srt`
+- 云端语音引擎输出从 `_xunfei.srt` 等改为 `.xunfei.srt` 等
+- s4/s5/run_pipeline 保留旧下划线后缀识别，兼容已有历史文件
+
+### improve: s3 本地转写增加进度提示
+- MLX 转写每 10 秒在同一行刷新估算进度，显示估算百分比、预计剩余时间和已用时间
+- MLX 完整转写成功后缓存本机实测速度，后续同模型使用历史速度平滑估算
+- faster-whisper 短音频按字幕时间输出百分比
+- faster-whisper 长音频分段时输出当前段号、段内心跳和整体进度
+
 ## 2026-03
 
 ### fix: ffmpeg 长音频提取死锁修复

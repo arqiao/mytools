@@ -1,0 +1,17 @@
+# python src/run_pipeline.py --config cfg/input.wechat.example.yaml --print-plan
+# python src/run_pipeline.py --config cfg/input.wechat.example.yaml --no-notify
+# 首次元宝登录用可见浏览器；已有登录态可追加 --wechat-headless。
+path_wechat_dir: "out-wechat/"
+path_log_dir: "log-err/"
+wechat_channels:
+  browser_profile: ".browser_data_wxchannels"
+  headless: false
+  login_timeout: 300
+  request_timeout: 30
+  verify_decode: true
+tasks:
+  - source_type: "wechat_channels"
+    source_huifang_url: "https://weixin.qq.com/sph/ALRGH1Htvi"
+    source_wiki_url: ""
+    target_wiki_url: ""
+  # 按需追加其余分享链接；空解析会以失败退出并中断流水线。

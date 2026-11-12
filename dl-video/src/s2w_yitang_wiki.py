@@ -1,25 +1,83 @@
-"""一堂文档 → 飞书文档 自动复制工具"""
+# 参数调用示例:
+#   python src/s2w_yitang_wiki.py
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki>
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --dry-run
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --resume
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --full-copy
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --no-attachments
+#   python src/s2w_yitang_wiki.py --export-local-md <url_yitangwiki>
+#   python src/s2w_yitang_wiki.py --export-local-md <url1> --export-local-md <url2>
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> \
+#       --exclude-before-heading <heading> --exclude-after-heading <heading>
+#   python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> \
+#       --include-start-heading <heading> --include-end-heading <heading>
+"""一堂文档 → 飞书文档 自动复制工具
+
+用法:
+  # 从 cfg/input.yaml 的 tasks 中读取一堂 wiki URL 和目标飞书 wiki URL
+  python src/s2w_yitang_wiki.py
+
+  # 指定一堂 wiki URL 和目标飞书 wiki URL
+  python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki>
+
+  # 仅导出原一堂文稿为本地 Markdown（可重复传入多个 URL）
+  python src/s2w_yitang_wiki.py --export-local-md <url_yitangwiki>
+
+  # 全文复制或按标题边界筛选（exclude_* 优先于同侧 include_*）
+  python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --full-copy
+  python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> \
+      --exclude-before-heading "头部最后章节" --exclude-after-heading "尾部第一章节"
+
+  # 默认下载页面及 Sheet 内的附件；需要时可关闭
+  python src/s2w_yitang_wiki.py <url_yitangwiki> <url_feishuwiki> --no-attachments
+
+配置:
+  cfg/input.yaml  — tasks 列表（source_wiki_url、target_wiki_url、full_copy 和标题边界字段）
+  cfg/config.yaml — s1_yitang_wikicopy.default_* 默认标题边界
+  cfg/config.yaml — path_attachment_dir 附件本地下载目录（默认 out-yitang/）
+  cfg/credentials.yaml — 一堂 cookie/token, 飞书 app_id / app_secret
+
+任务级范围字段:
+  full_copy: true                 # 忽略全部边界，复制全文
+  exclude_before_heading: "..."   # 排除该标题完整章节及之前内容
+  exclude_after_heading: "..."    # 排除该标题完整章节及之后内容
+  include_start_heading: "..."    # 从该标题开始复制
+  include_end_heading: "..."      # 复制该标题完整章节后停止
+"""
 
 import hashlib
 import hmac
 import json
 import logging
 import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
 import time
 from base64 import b64decode, b64encode
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import requests
 import yaml
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
-from modules.config_utils import load_config
+from modules.config_utils import (
+    TARGET_WIKI_URL_ERROR,
+    is_valid_target_wiki_url,
+    load_config,
+)
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent  # 项目根目录（src/ 的上级）
 CFG_DIR = PROJECT_DIR / "cfg"
-_input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+try:
+    _input_cfg = yaml.safe_load((CFG_DIR / "input.yaml").read_text(encoding="utf-8")) or {}
+except yaml.YAMLError:
+    _input_cfg = {}
 LOG_DIR = PROJECT_DIR / _input_cfg.get("path_log_dir", "log-err")
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -47,6 +105,10 @@ UNSUPPORTED_TYPES = {
     40: "add_ons/倒计时",
 }
 
+# 飞书 Docx 创建普通表格时，对单张表的单元格数有较低限制。
+# 已实测 16x3 会被拒绝、6x3 可写入，故保守限制为 18 格。
+MAX_TABLE_CELLS_PER_BLOCK = 18
+
 # 容器类 block（有 children 但自身无文本，需要递归处理子节点）
 CONTAINER_TYPES = {
     19: "callout",       # 高亮块
@@ -58,14 +120,21 @@ HEADING_TYPES = set(range(3, 12))
 
 
 class YitangCopier:
-    def __init__(self):
-        config, creds = load_config()
+    def __init__(self, include_input=True):
+        config, creds = load_config(include_input=include_input)
         self.config = config
         self.creds = creds
         self.session = requests.Session()
         self.skipped_blocks = []  # 记录无法复制的 blocks
         self._quota_exhausted = False  # 额度耗尽标志
-        self.full_copy_titles = [self.config["s1_yitang_ailive"]["query_copystr"]]  # 需要全文复制的标题关键词
+        self._current_source_origin = "https://yitanger.feishu.cn"
+        self._source_is_yitang = False
+        self._last_image_download_error = ""
+        self._chrome_cookie_cache = None
+        self.download_attachments = True
+        self._downloaded_attachment_tokens = set()
+        ailive_cfg = self.config.get("s1_yitang_ailive", {})
+        self.full_copy_titles = [ailive_cfg.get("query_copystr", "AI落地Live")]  # 需要全文复制的标题关键词
 
     # ── 一堂认证 ──────────────────────────────────────────
 
@@ -335,7 +404,7 @@ class YitangCopier:
             8: ["heading6"], 9: ["heading7"], 10: ["heading8"],
             11: ["heading9"], 12: ["bullet"], 13: ["ordered"],
             14: ["code"], 15: ["quote"], 19: ["callout"],
-            22: ["divider"], 23: ["file"], 24: ["grid"], 30: ["sheet"],
+            22: ["divider"], 23: ["file"], 24: ["grid"], 26: ["iframe"], 30: ["sheet"],
             25: ["grid_column"], 27: ["image"],
             31: ["table"], 32: ["table_cell"], 33: ["merge_cell"],
             34: ["quote_container"],
@@ -349,10 +418,11 @@ class YitangCopier:
         # 单个 embed-image
         if isinstance(val, dict) and val.get("type") == "embed-image":
             return [self._make_image_block(val)]
+        if isinstance(val, dict) and val.get("type") == "attachment":
+            return [self._make_attachment_block(val)]
         # 单个 dict（mention 等）
         if isinstance(val, dict):
-            text = val.get("text") or val.get("name") or str(val)
-            return [self._make_text_block(text)]
+            return [self._make_rich_text_block([self._sheet_item_to_element(val)])]
         # list：混合内容，分离文本和图片
         if isinstance(val, list):
             blocks = []
@@ -363,13 +433,13 @@ class YitangCopier:
                         blocks.append(self._make_rich_text_block(elements_buf))
                         elements_buf = []
                     blocks.append(self._make_image_block(item))
+                elif isinstance(item, dict) and item.get("type") == "attachment":
+                    if elements_buf:
+                        blocks.append(self._make_rich_text_block(elements_buf))
+                        elements_buf = []
+                    blocks.append(self._make_attachment_block(item))
                 elif isinstance(item, dict):
-                    text = item.get("text") or item.get("name") or str(item)
-                    el = {"textRun": {"content": text}}
-                    style = self._convert_segment_style(item.get("segmentStyle"))
-                    if style:
-                        el["textRun"]["textElementStyle"] = style
-                    elements_buf.append(el)
+                    elements_buf.append(self._sheet_item_to_element(item))
                 else:
                     elements_buf.append({"textRun": {"content": str(item) if item else ""}})
             if elements_buf:
@@ -377,6 +447,18 @@ class YitangCopier:
             return blocks or [self._make_text_block("")]
         # 普通标量
         return [self._make_text_block(str(val))]
+
+    def _sheet_item_to_element(self, item: dict) -> dict:
+        """将 Sheet 富文本片段转为文本元素，并保留 URL/Wiki/文档链接。"""
+        text = item.get("text") or item.get("name") or str(item)
+        element = {"textRun": {"content": text}}
+        style = self._convert_segment_style(item.get("segmentStyle"))
+        link = unquote(str(item.get("link") or item.get("url") or "")).strip()
+        if link.startswith(("https://", "http://")):
+            style["link"] = {"url": link}
+        if style:
+            element["textRun"]["textElementStyle"] = style
+        return element
 
     @staticmethod
     def _convert_segment_style(seg_style: dict) -> dict:
@@ -424,6 +506,19 @@ class YitangCopier:
                     "height": val.get("height", 0),
                 },
             },
+            "childrens": [],
+        }
+
+    @staticmethod
+    def _make_attachment_block(val: dict) -> dict:
+        """将 Sheet 附件转为普通 file block，供下载与目标文档展示共用。"""
+        return {
+            "type": 23,
+            "blockAttr": {"file": {
+                "token": val.get("fileToken", ""),
+                "name": val.get("text", ""),
+                "mime_type": val.get("mimeType", ""),
+            }},
             "childrens": [],
         }
 
@@ -477,6 +572,18 @@ class YitangCopier:
         if not actual_rows:
             return {}
 
+        # Sheet 常在封面图和若干空行之后才出现列标题。将封面移到表格前，
+        # 令标题行成为原生表格的首行，才能在目标文档中显示为标题行。
+        header_index = self._find_sheet_header_row(rows, col_count)
+        prelude = []
+        if header_index is not None:
+            for row in rows[:header_index]:
+                for cell in row[:col_count]:
+                    if cell:
+                        prelude.extend(self._sheet_val_to_blocks(cell))
+            rows = rows[header_index:]
+            actual_rows = len(rows)
+
         # 构建一堂格式的 table block
         # 每个 cell 可包含多个子节点（文本 + 图片混合）
         childrens = []
@@ -495,11 +602,25 @@ class YitangCopier:
             "blockAttr": {"table": {"property": {
                 "row_size": actual_rows,
                 "column_size": col_count,
+                "header_row": header_index is not None,
             }}},
             "childrens": childrens,
         }
+        if prelude:
+            table_block["blockAttr"]["sheet_prelude"] = prelude
         log.info(f"sheet → table: {actual_rows}x{col_count}")
         return table_block
+
+    @staticmethod
+    def _find_sheet_header_row(rows: list, col_count: int) -> int | None:
+        """返回第一行完整文本列标题的位置；未找到时返回 None。"""
+        for index, row in enumerate(rows):
+            cells = row[:col_count]
+            if len(cells) == col_count and all(
+                isinstance(cell, str) and cell.strip() for cell in cells
+            ):
+                return index
+        return None
 
     # ── 内容过滤 ──────────────────────────────────────────
 
@@ -651,43 +772,93 @@ class YitangCopier:
                 return True
         return False
 
-    def filter_blocks(self, blocks_data: dict, doc_title: str = "") -> list:
+    @staticmethod
+    def _heading_level(block: dict) -> int | None:
+        block_type = block.get("type", 0)
+        return block_type - 2 if block_type in HEADING_TYPES else None
+
+    def _find_heading(self, blocks: list, heading: str, start_idx: int = 0):
+        """返回从 start_idx 起第一个文本包含 heading 的标题 block 索引。"""
+        for idx in range(start_idx, len(blocks)):
+            if self._heading_level(blocks[idx]) is not None and heading in self._get_block_text(blocks[idx]):
+                return idx
+        return None
+
+    def _section_end(self, blocks: list, heading_idx: int) -> int:
+        """返回标题章节结束位置（下一同级或更高层标题的位置）。"""
+        level = self._heading_level(blocks[heading_idx])
+        for idx in range(heading_idx + 1, len(blocks)):
+            next_level = self._heading_level(blocks[idx])
+            if next_level is not None and next_level <= level:
+                return idx
+        return len(blocks)
+
+    def _copy_boundaries(self, mapping: dict | None) -> dict:
+        """合并任务和默认复制边界；任务任一同侧字段会覆盖该侧默认值。"""
+        mapping = mapping or {}
+        defaults = self.config.get("s1_yitang_wikicopy", {})
+
+        def side(exclude_key: str, include_key: str):
+            task_exclude = mapping.get(exclude_key, "") or ""
+            task_include = mapping.get(include_key, "") or ""
+            if task_exclude or task_include:
+                return task_exclude, task_include
+            return (
+                defaults.get(f"default_{exclude_key}", "") or "",
+                defaults.get(f"default_{include_key}", "") or "",
+            )
+
+        before_exclude, start_include = side("exclude_before_heading", "include_start_heading")
+        after_exclude, end_include = side("exclude_after_heading", "include_end_heading")
+        return {
+            "exclude_before_heading": before_exclude,
+            "include_start_heading": start_include,
+            "exclude_after_heading": after_exclude,
+            "include_end_heading": end_include,
+        }
+
+    def filter_blocks(self, blocks_data: dict, doc_title: str = "", mapping: dict | None = None) -> list:
+        """按任务/默认标题边界筛选一堂文档的连续章节范围。"""
+        root = blocks_data.get("blocks", blocks_data.get("block", blocks_data))
+        flat = self._flatten_blocks(root)
+
+        if mapping and mapping.get("full_copy", False):
+            return flat
+
         # 检查是否需要全文复制（标题匹配关键词时）
         if doc_title and self.full_copy_titles:
             for kw in self.full_copy_titles:
                 if kw in doc_title:
-                    root = blocks_data.get("blocks", blocks_data.get("block", blocks_data))
-                    return self._flatten_blocks(root)
+                    return flat
 
-        start_kw = self.config.get("s1_yitang_wikicopy", {})["start_heading"]
-        end_kw = self.config.get("s1_yitang_wikicopy", {})["end_heading"]
-        root = blocks_data.get("blocks", blocks_data.get("block", blocks_data))
-        flat = self._flatten_blocks(root)
-
-        collecting = False
-        end_found = False
-        result = []
-        for b in flat:
-            btype = b.get("type", 0)
-            text = self._get_block_text(b)
-            if not collecting:
-                if btype in HEADING_TYPES and start_kw in text:
-                    collecting = True
-                    result.append(b)
-                continue
-            result.append(b)
-            if not end_found and btype in HEADING_TYPES and end_kw in text:
-                end_found = True
-                continue
-            if end_found and btype in HEADING_TYPES:
-                result.pop()  # 移除下一章节的标题
-                break
-
-        # start_heading 找不到时 fallback 到全文复制
-        if not result:
-            self._warn(f"  未找到 start_heading '{start_kw}'，fallback 到全文复制")
+        boundaries = self._copy_boundaries(mapping)
+        start_heading = boundaries["exclude_before_heading"] or boundaries["include_start_heading"]
+        end_heading = boundaries["exclude_after_heading"] or boundaries["include_end_heading"]
+        if not start_heading and not end_heading:
             return flat
-        return result
+
+        start_idx = 0
+        if start_heading:
+            matched_idx = self._find_heading(flat, start_heading)
+            if matched_idx is None:
+                self._warn(f"  未找到起始边界标题 '{start_heading}'，fallback 到全文复制")
+                return flat
+            if boundaries["exclude_before_heading"]:
+                start_idx = self._section_end(flat, matched_idx)
+            else:
+                start_idx = matched_idx
+
+        end_idx = len(flat)
+        if end_heading:
+            matched_idx = self._find_heading(flat, end_heading, start_idx)
+            if matched_idx is None:
+                self._warn(f"  未找到结束边界标题 '{end_heading}'，保留至文档末尾")
+            elif boundaries["exclude_after_heading"]:
+                end_idx = matched_idx
+            else:
+                end_idx = self._section_end(flat, matched_idx)
+
+        return flat[start_idx:end_idx]
 
     # ── Block 转换 ────────────────────────────────────────
 
@@ -880,6 +1051,172 @@ class YitangCopier:
             },
         }
 
+    # ── 附件下载 ─────────────────────────────────────────
+
+    @staticmethod
+    def _safe_attachment_name(name: str, token: str) -> str:
+        """生成可用于本地文件系统的附件文件名。"""
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+        return safe_name or f"附件_{token}"
+
+    def _download_attachment(self, file_info: dict, doc_title: str) -> Path | None:
+        """下载一个飞书文档或 Sheet 附件，失败时仅记录警告。"""
+        token = (
+            file_info.get("token") or file_info.get("file_token")
+            or file_info.get("fileToken") or ""
+        )
+        if not token or token in self._downloaded_attachment_tokens:
+            return None
+        self._downloaded_attachment_tokens.add(token)
+
+        safe_title = re.sub(r'[\\/:*?"<>|]', "_", doc_title).strip() or "未命名文稿"
+        output_dir = PROJECT_DIR / self.config.get(
+            "path_attachment_dir", "out-yitang/"
+        ) / safe_title
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = self._safe_attachment_name(file_info.get("name", ""), token)
+        target = output_dir / filename
+        stem, suffix = target.stem, target.suffix
+        copy_index = 1
+        while target.exists():
+            target = output_dir / f"{stem}-copy{copy_index}{suffix}"
+            copy_index += 1
+
+        errors = []
+        response = None
+
+        # 一堂页面中的附件由其媒体代理生成一次性授权下载地址；视频控件和
+        # 浏览器的“下载媒体”都走该路径，不能直接用飞书 file token 下载。
+        if getattr(self, "_source_is_yitang", False):
+            try:
+                response = self.session.get(
+                    f"https://yitang.top/api/feishu/media/{token}",
+                    stream=True, timeout=60,
+                )
+                response.raise_for_status()
+                if "application/json" in response.headers.get("Content-Type", ""):
+                    raise RuntimeError(response.text[:200])
+                log.info("使用一堂媒体下载接口成功")
+            except Exception as yitang_error:
+                errors.append(f"一堂接口: {yitang_error}")
+                response = None
+
+        if response is None:
+            # 附件下载权限未授予应用时，复用已登录 Chrome/飞书客户端的用户登录态。
+            try:
+                self._ensure_feishu_token()
+                response = self.session.get(
+                    f"{FEISHU_BASE}/drive/v1/medias/{token}/download",
+                    headers=self._feishu_headers(), stream=True, timeout=60,
+                )
+                response.raise_for_status()
+                if "application/json" in response.headers.get("Content-Type", ""):
+                    raise RuntimeError(response.text[:200])
+            except Exception as api_error:
+                errors.append(f"应用接口: {api_error}")
+                response = None
+
+        if response is None:
+            try:
+                preview_url = (
+                    "https://internal-api-drive-stream.feishu.cn/space/api/box/"
+                    f"stream/download/preview/{token}/?preview_type=16"
+                )
+                response = self._request_feishu_image(preview_url)
+                response.raise_for_status()
+                if "application/json" in response.headers.get("Content-Type", ""):
+                    raise RuntimeError(response.text[:200])
+                log.info("使用本机浏览器/飞书客户端登录态下载附件成功")
+            except Exception as browser_error:
+                errors.append(f"浏览器登录态: {browser_error}")
+                self._warn(
+                    f"附件下载失败: {filename} ({token}) - {'; '.join(errors)}"
+                )
+                return None
+
+        with target.open("wb") as file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    file.write(chunk)
+        log.info(f"附件已下载: {target}")
+        return target
+
+    def _download_attachments(self, blocks: list, doc_title: str):
+        """递归下载筛选范围内的普通附件、Sheet 单元格附件、iframe 视频。"""
+        if not self.download_attachments:
+            return
+
+        def visit(block):
+            if not isinstance(block, dict):
+                return
+            if block.get("type") == 23:
+                self._download_attachment(block.get("blockAttr", {}).get("file", {}), doc_title)
+            elif block.get("type") == 26:
+                iframe = block.get("blockAttr", {}).get("iframe", {})
+                self._download_iframe_video(iframe, doc_title)
+            for child in block.get("childrens", []):
+                visit(child)
+
+        for block in blocks:
+            visit(block)
+
+    def _download_iframe_video(self, iframe_data: dict, doc_title: str):
+        """下载 iframe 中嵌入的飞书妙记视频。"""
+        if not iframe_data:
+            return
+        component = iframe_data.get("component", {})
+        if not component:
+            return
+        encoded_url = component.get("url", "")
+        if not encoded_url:
+            return
+        from urllib.parse import unquote
+        url = unquote(encoded_url)
+        if "/minutes/" not in url:
+            log.info(f"iframe 非妙记链接，跳过: {url}")
+            return
+
+        # 提取妙记 token
+        m = re.search(r"/minutes/([a-zA-Z0-9_-]+)", url)
+        if not m:
+            log.info(f"无法解析妙记 token: {url}")
+            return
+        token = m.group(1)
+
+        safe_title = re.sub(r'[\\/:*?"<>|]', "_", doc_title).strip() or "未命名文稿"
+        output_dir = PROJECT_DIR / self.config.get(
+            "path_attachment_dir", "out-yitang/"
+        ) / safe_title
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 优先使用本机浏览器/飞书客户端的活跃 cookie，兜底 credentials.yaml
+        cookie = self._local_feishu_cookie_header(url) or self.creds["feishu"].get("browser_cookie", "")
+        if not cookie:
+            self._warn(f"缺少 feishu cookie，无法下载妙记视频: {token}")
+            return
+
+        from s1w_feishumiaoji import get_minutes_media, download_video
+        log.info(f"iframe 妙记视频: token={token}")
+        page_title, video_url, vtt_url, create_time = get_minutes_media(
+            token, cookie, self.session, url
+        )
+        if not video_url:
+            log.info(f"妙记视频无 video_url: {token}")
+            return
+
+        video_name = page_title or token
+        video_safe = re.sub(r'[\\/:*?"<>|]', "_", video_name).strip()
+        video_path = output_dir / f"{video_safe}.ts"
+        if video_path.exists():
+            log.info(f"妙记视频已存在，跳过: {video_path}")
+            return
+
+        log.info(f"下载妙记视频: {video_name}")
+        # download_video 硬编码了 waytoagi Referer，这里需要修正为妙记页面的实际域名
+        from urllib.parse import urlparse
+        minutes_origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+        download_video(video_url, video_path, cookie, referer=minutes_origin)
+
     def _convert_nested_list(self, block: dict, doc_id: str) -> dict | None:
         """转换有子列表的列表项：返回特殊结构，append_to_feishu 分步写入"""
         # 先转换父列表项自身（不含子列表）
@@ -953,6 +1290,8 @@ class YitangCopier:
         col_width = table_prop.get("column_width")
         if col_width:
             table_def["table"]["property"]["column_width"] = col_width
+        if table_prop.get("header_row"):
+            table_def["table"]["property"]["header_row"] = True
 
         # 收集每个 cell 的内容（按行主序）
         cells_content = []
@@ -991,6 +1330,10 @@ class YitangCopier:
             "table_def": table_def,
             "cells_content": cells_content,
             "merge_info": merge_info,
+            "prelude": [
+                converted for child in attr.get("sheet_prelude", [])
+                if (converted := self.convert_block(child, doc_id))
+            ],
         }
 
     def handle_image(self, block: dict, doc_id: str) -> dict | None:
@@ -1007,6 +1350,8 @@ class YitangCopier:
 
     def _download_image(self, cdn_url: str, doc_id: str) -> Path | None:
         """下载图片到临时目录，返回本地路径"""
+        self._last_image_download_error = ""
+        resp = None
         try:
             if cdn_url.startswith("feishu://token/"):
                 # 飞书文档内图片：通过内部 API + 浏览器 cookie 下载
@@ -1016,34 +1361,23 @@ class YitangCopier:
                     f"/space/api/box/stream/download/preview/{file_token}/"
                     f"?preview_type=16"
                 )
-                browser_cookie = self.creds["feishu"].get("browser_cookie", "")
-                resp = self.session.get(
-                    dl_url, headers={
-                        "Cookie": browser_cookie,
-                        "Origin": "https://yitanger.feishu.cn",
-                        "Referer": "https://yitanger.feishu.cn/",
-                        "sec-fetch-dest": "empty",
-                        "sec-fetch-mode": "cors",
-                        "sec-fetch-site": "same-site",
-                    }, timeout=30,
-                )
+                resp = self._request_feishu_image(dl_url)
             elif "feishu.cn/" in cdn_url:
                 # 飞书域名下的图片（sheet_image 等）：同样需要 browser_cookie
-                browser_cookie = self.creds["feishu"].get("browser_cookie", "")
-                resp = self.session.get(
-                    cdn_url, headers={
-                        "Cookie": browser_cookie,
-                        "Origin": "https://yitanger.feishu.cn",
-                        "Referer": "https://yitanger.feishu.cn/",
-                    }, timeout=30,
-                )
+                resp = self._request_feishu_image(cdn_url)
             else:
                 resp = self.session.get(cdn_url, timeout=30)
             resp.raise_for_status()
         except Exception as e:
+            self._last_image_download_error = str(e)
             self._warn(f"图片下载失败: {cdn_url} - {e}")
             return None
+
         content_type = resp.headers.get("Content-Type", "image/png")
+        if not content_type.startswith("image/"):
+            self._last_image_download_error = f"返回内容不是图片: {content_type}"
+            self._warn(f"图片下载失败: {cdn_url} - {self._last_image_download_error}")
+            return None
         ext = content_type.split("/")[-1].split(";")[0]
         filename = f"image_{int(time.time() * 1000)}.{ext}"
         temp_dir = PROJECT_DIR / "temp_images" / doc_id[:8]
@@ -1052,6 +1386,204 @@ class YitangCopier:
         temp_path.write_bytes(resp.content)
         return temp_path
 
+    def _request_feishu_image(self, url: str) -> requests.Response:
+        """用源文档域名优先下载飞书图片，兼容不同飞书租户域名。"""
+        browser_cookie = self.creds["feishu"].get("browser_cookie", "")
+        origins = [
+            self._current_source_origin,
+            "https://yitanger.feishu.cn",
+            "https://www.feishu.cn",
+        ]
+        parsed = urlparse(url)
+        if (
+            parsed.scheme
+            and parsed.netloc
+            and "feishu.cn" in parsed.netloc
+            and not parsed.netloc.startswith("internal-api-")
+        ):
+            origins.insert(0, f"{parsed.scheme}://{parsed.netloc}")
+
+        last_resp = None
+        last_error = None
+        seen = set()
+        for origin in origins:
+            if not origin or origin in seen:
+                continue
+            seen.add(origin)
+            headers = {
+                "Cookie": browser_cookie,
+                "Origin": origin,
+                "Referer": origin + "/",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+                ),
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
+            }
+            try:
+                resp = self.session.get(url, headers=headers, timeout=30)
+                last_resp = resp
+                if resp.status_code < 400:
+                    return resp
+            except Exception as e:
+                last_error = e
+
+            local_cookie = self._local_feishu_cookie_header(url)
+            if local_cookie and local_cookie != browser_cookie:
+                headers["Cookie"] = local_cookie
+                try:
+                    resp = self.session.get(url, headers=headers, timeout=30)
+                    last_resp = resp
+                    if resp.status_code < 400:
+                        log.info("使用本机浏览器/飞书客户端登录态下载飞书图片成功")
+                        return resp
+                except Exception as e:
+                    last_error = e
+
+        if last_resp is not None:
+            last_resp.raise_for_status()
+            return last_resp
+        raise last_error or RuntimeError("飞书图片下载无响应")
+
+    def _local_feishu_cookie_header(self, url: str) -> str:
+        """从本机浏览器/飞书客户端读取 feishu.cn cookie，供图片下载兜底。"""
+        cookies = self._load_local_feishu_cookies()
+        if not cookies:
+            return ""
+
+        request_host = urlparse(url).netloc
+        source_host = urlparse(self._current_source_origin).netloc
+        wanted_hosts = [request_host, source_host, ".feishu.cn"]
+        pairs = []
+        seen = set()
+
+        for preferred_host in wanted_hosts:
+            for host, name, value in cookies:
+                if not value or name in seen:
+                    continue
+                if host == preferred_host or (
+                    host.startswith(".") and preferred_host.endswith(host.lstrip("."))
+                ):
+                    pairs.append(f"{name}={value}")
+                    seen.add(name)
+
+        return "; ".join(pairs)
+
+    def _load_local_feishu_cookies(self) -> list[tuple[str, str, str]]:
+        """读取并解密本机浏览器/飞书客户端中 feishu.cn 相关 cookie。失败返回空列表。"""
+        if self._chrome_cookie_cache is not None:
+            return self._chrome_cookie_cache
+
+        self._chrome_cookie_cache = []
+        if sys.platform != "darwin":
+            return self._chrome_cookie_cache
+
+        sources = self._local_cookie_sources()
+        cookies = []
+        for cookie_db, service, account in sources:
+            if not cookie_db.exists():
+                continue
+            cookies.extend(self._read_chromium_cookie_db(cookie_db, service, account))
+
+        self._chrome_cookie_cache = cookies
+        if cookies:
+            log.info(f"已读取本机飞书 cookie: {len(cookies)} 个")
+        return self._chrome_cookie_cache
+
+    @staticmethod
+    def _local_cookie_sources() -> list[tuple[Path, str, str]]:
+        home = Path.home()
+        sources = [
+            (
+                home / "Library/Application Support/Google/Chrome/Default/Cookies",
+                "Chrome Safe Storage",
+                "Chrome",
+            ),
+        ]
+
+        feishu_root = (
+            home
+            / "Library/Containers/com.bytedance.macos.feishu/Data/Library/Application Support/LarkShell"
+        )
+        if feishu_root.exists():
+            for cookie_db in feishu_root.glob("**/Cookies"):
+                if "Safe Browsing" in str(cookie_db):
+                    continue
+                sources.append((
+                    cookie_db,
+                    "Suite App Safe Storage",
+                    "XY6NLV7YTS.com.bytedance.macos.feishu-SuiteApp",
+                ))
+        return sources
+
+    def _read_chromium_cookie_db(self, cookie_db: Path, service: str, account: str) -> list[tuple[str, str, str]]:
+        """读取一个 Chromium Cookie DB。"""
+        cookies = []
+
+        try:
+            password = subprocess.check_output(
+                ["security", "find-generic-password", "-s", service, "-a", account, "-w"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            ).strip().encode()
+            key = hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", 1003, 16)
+            iv = b" " * 16
+
+            tmp_db = Path(tempfile.gettempdir()) / f"dl-video-cookies-{abs(hash(str(cookie_db)))}.sqlite"
+            shutil.copy2(cookie_db, tmp_db)
+            con = sqlite3.connect(tmp_db)
+            cur = con.cursor()
+            cur.execute(
+                "select host_key, name, value, encrypted_value from cookies where host_key like ?",
+                ("%feishu.cn%",),
+            )
+            rows = cur.fetchall()
+            con.close()
+
+            for host, name, value, encrypted in rows:
+                cookie_value = value or self._decrypt_chrome_cookie_value(host, encrypted, key, iv)
+                if cookie_value:
+                    cookies.append((host, name, cookie_value))
+        except subprocess.TimeoutExpired:
+            log.info(f"读取本机 Cookie 超时，可能需要允许 Keychain 访问: {service}")
+        except Exception as e:
+            log.debug(f"读取 Cookie DB 失败 ({cookie_db}): {e}")
+
+        return cookies
+
+    @staticmethod
+    def _decrypt_chrome_cookie_value(host: str, encrypted: bytes, key: bytes, iv: bytes) -> str:
+        if not encrypted:
+            return ""
+        data = encrypted[3:] if encrypted.startswith(b"v10") else encrypted
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(data) + decryptor.finalize()
+        unpadder = PKCS7(128).unpadder()
+        plain = unpadder.update(padded) + unpadder.finalize()
+
+        # Chrome 新版本会在明文前加 host_key 的 sha256 摘要。
+        digest = hashlib.sha256(host.encode()).digest()
+        if plain.startswith(digest):
+            plain = plain[len(digest):]
+        return plain.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _image_placeholder_block(cdn_url: str, reason: str = "") -> dict:
+        text = "[图片未复制]"
+        if reason:
+            text += f" {reason[:80]}"
+        if cdn_url:
+            text += f"\n{cdn_url}"
+        return {
+            "block_type": 2,
+            "text": {
+                "elements": [{"text_run": {"content": text}}],
+            },
+        }
+
     def _write_image(self, doc_id: str, parent_id: str, image_data: dict):
         """三步写入图片: 创建空 block → 上传到 block → replace_image"""
         cdn_url = image_data["cdn_url"]
@@ -1059,6 +1591,12 @@ class YitangCopier:
         # 1. 下载图片
         temp_path = self._download_image(cdn_url, doc_id)
         if not temp_path:
+            reason = self._last_image_download_error or "下载失败"
+            self._write_blocks_batched(
+                doc_id,
+                parent_id,
+                [self._image_placeholder_block(cdn_url, reason)],
+            )
             return
 
         file_size = temp_path.stat().st_size
@@ -1537,8 +2075,55 @@ class YitangCopier:
                 normal_buf.append(b)
         _flush()
 
+    def _split_table_rows(self, table_data, max_rows):
+        """将表格按连续行拆分，保持每个单元格内容的行主序顺序。"""
+        prop = table_data["table_def"]["table"]["property"]
+        row_size = prop["row_size"]
+        col_size = prop["column_size"]
+        cells_content = table_data.get("cells_content", [])
+        parts = []
+
+        for start_row in range(0, row_size, max_rows):
+            end_row = min(start_row + max_rows, row_size)
+            part_prop = {
+                "row_size": end_row - start_row,
+                "column_size": col_size,
+            }
+            if prop.get("column_width"):
+                part_prop["column_width"] = prop["column_width"]
+            if prop.get("header_row") and start_row == 0:
+                part_prop["header_row"] = True
+            parts.append({
+                "_table": True,
+                "table_def": {"block_type": 31, "table": {"property": part_prop}},
+                "cells_content": cells_content[start_row * col_size:end_row * col_size],
+                # 跨拆分边界的合并无法在不同表之间保留；内容仍会写入。
+                "merge_info": [],
+            })
+        return parts
+
     def _write_table(self, doc_id, parent_id, table_data):
         """创建空表格 → 获取 cell block_id → 逐 cell 写入内容 → 合并单元格"""
+        prelude = table_data.get("prelude", [])
+        if prelude:
+            self._write_column_content(doc_id, parent_id, prelude)
+        prop = table_data["table_def"]["table"]["property"]
+        row_size = prop["row_size"]
+        col_size = prop["column_size"]
+        cell_count = row_size * col_size
+        if cell_count > MAX_TABLE_CELLS_PER_BLOCK:
+            max_rows = max(1, MAX_TABLE_CELLS_PER_BLOCK // col_size)
+            part_count = (row_size + max_rows - 1) // max_rows
+            if table_data.get("merge_info"):
+                self._warn("table 跨表拆分：合并单元格格式无法保留，但单元格内容会保留")
+            log.info(
+                f"table {row_size}x{col_size} 超过单表限制，"
+                f"按行拆分为 {part_count} 个表格写入"
+            )
+            for part in self._split_table_rows(table_data, max_rows):
+                self._write_table(doc_id, parent_id, part)
+            return
+
         url = f"{FEISHU_BASE}/docx/v1/documents/{doc_id}/blocks/{parent_id}/children"
         body = {"children": [table_data["table_def"]], "index": -1}
         result = self._api_call(
@@ -1546,7 +2131,10 @@ class YitangCopier:
             "table创建",
         )
         if result.get("code") != 0:
-            self._warn(f"table 创建失败: {result.get('msg', '')[:100]}")
+            self._warn(
+                f"table 创建失败 (code={result.get('code')}): "
+                f"{result.get('msg', '')[:100]}"
+            )
             return
 
         # 从返回中提取 table block 及其 cell block_ids
@@ -1599,8 +2187,6 @@ class YitangCopier:
             written += 1
             time.sleep(0.2)
 
-        row_size = table_data["table_def"]["table"]["property"]["row_size"]
-        col_size = table_data["table_def"]["table"]["property"]["column_size"]
         log.info(f"已写入 table {row_size}x{col_size} ({written} cells 有内容)")
 
         # 合并单元格
@@ -1930,9 +2516,23 @@ class YitangCopier:
         path.write_text("\n".join(lines), encoding="utf-8")
         log.info(f"  本地导出完成: {path} ({len(blocks)} blocks)")
 
+    def local_export_path(self, mapping: dict, doc_title: str) -> Path | None:
+        """返回本地 Markdown 的输出路径。"""
+        export_name = mapping.get("local_export", "")
+        if not export_name:
+            manual_output = mapping.get("output_name", "").strip()
+            if manual_output:
+                export_name = f"{manual_output}.md"
+            elif doc_title:
+                safe_title = re.sub(r'[\\/:*?"<>|]', "_", doc_title).strip()
+                export_name = f"{safe_title}.md"
+        if not export_name:
+            return None
+        return Path(self.config.get("path_yitang_dir", "out-yitang/")) / export_name
+
     # ── 主流程 ────────────────────────────────────────────
 
-    def run(self, mappings=None):
+    def run(self, mappings=None, overrides=None):
         if mappings is None:
             # 独立运行：从 tasks 筛选 yitang 任务构建 mappings
             tasks = self.config.get("tasks", [])
@@ -1943,22 +2543,45 @@ class YitangCopier:
                         "source_url": t["source_wiki_url"],
                         "target_url": t.get("target_wiki_url", ""),
                         "output_name": t.get("output_name", ""),
+                        "no_attachments": t.get("no_attachments", False),
+                        "full_copy": t.get("full_copy", False),
+                        "exclude_before_heading": t.get("exclude_before_heading", ""),
+                        "exclude_after_heading": t.get("exclude_after_heading", ""),
+                        "include_start_heading": t.get("include_start_heading", ""),
+                        "include_end_heading": t.get("include_end_heading", ""),
                     })
         if not mappings:
             log.warning("没有找到 yitang 文稿任务（tasks 中无 source_wiki_url）")
-            return
+            return False
+        if overrides:
+            mappings = [{**mapping, **overrides} for mapping in mappings]
+        if any(not is_valid_target_wiki_url(mapping.get("target_url", "")) for mapping in mappings):
+            log.error(TARGET_WIKI_URL_ERROR)
+            return False
 
+        all_succeeded = True
         for idx, m in enumerate(mappings):
             # 检查是否已额度耗尽
             if self._quota_exhausted:
                 log.warning("检测到 API 额度耗尽，停止后续任务")
+                all_succeeded = False
                 break
 
             source_url = m["source_url"]
             target_url = m["target_url"]
+            local_only = m.get("local_only", False)
+            self.download_attachments = not m.get("no_attachments", False)
+            self._downloaded_attachment_tokens = set()
+            self._source_is_yitang = not self._is_feishu_url(source_url)
             log.info(f"[{idx + 1}/{len(mappings)}] 处理: {source_url}")
 
             try:
+                parsed_source = urlparse(source_url)
+                if parsed_source.scheme and parsed_source.netloc and "feishu.cn" in parsed_source.netloc:
+                    self._current_source_origin = f"{parsed_source.scheme}://{parsed_source.netloc}"
+                else:
+                    self._current_source_origin = "https://yitanger.feishu.cn"
+
                 # 1. 获取源文档 blocks
                 if self._is_feishu_wiki_url(source_url):
                     blocks_data = self.fetch_feishu_wiki_blocks(source_url)
@@ -1980,11 +2603,11 @@ class YitangCopier:
 
                 # 2. 过滤内容范围（飞书原始文档直接全文复制）
                 is_feishu = self._is_feishu_url(source_url)
-                if is_feishu or m.get("full_copy", False):
+                if is_feishu:
                     root_block = blocks_data.get("blocks", {})
                     filtered = self._flatten_blocks(root_block)
                 else:
-                    filtered = self.filter_blocks(blocks_data, doc_title)
+                    filtered = self.filter_blocks(blocks_data, doc_title, m)
 
                 # 3. 标题自动编号（飞书和一堂文档通用）
                 heading_cfg = m.get("heading_number", {})
@@ -1995,6 +2618,19 @@ class YitangCopier:
                 log.info(f"  过滤后 blocks 数: {len(filtered)}")
                 if not filtered:
                     self._warn("  过滤后无内容，跳过")
+                    all_succeeded = False
+                    continue
+
+                self._download_attachments(filtered, doc_title)
+
+                if local_only:
+                    export_path = self.local_export_path(m, doc_title)
+                    if not export_path:
+                        raise RuntimeError("无法确定本地 Markdown 输出文件名")
+                    self.export_local_md(filtered, str(export_path), doc_title)
+                    log.info(f"  本地 MD 已导出: {export_path}")
+                    self._write_skip_log(doc_title, source_url)
+                    self._stop_article_log()
                     continue
 
                 # debug: dump 含特定关键词的 block 完整结构
@@ -2043,18 +2679,8 @@ class YitangCopier:
                     log.info(f"  写入完成!")
 
                 # 5.5 本地导出 Markdown
-                # 优先级：local_export > output_name > 自动标题
-                export_dir = self.config["path_yitang_dir"]
-                export_name = m.get("local_export", "")
-                if not export_name:
-                    manual_output = m.get("output_name", "").strip()
-                    if manual_output:
-                        export_name = f"{manual_output}.md"
-                    elif doc_title:
-                        safe_title = re.sub(r'[\\/:*?"<>|]', "_", doc_title).strip()
-                        export_name = f"{safe_title}.md"
-                if export_name:
-                    export_path = Path(export_dir) / export_name
+                export_path = self.local_export_path(m, doc_title)
+                if export_path:
                     self.export_local_md(filtered, str(export_path), doc_title)
                     log.info(f"  本地 MD 已导出: {export_path}")
 
@@ -2067,9 +2693,11 @@ class YitangCopier:
                 self._record_warning(f"[ERROR] 处理失败: {e}")
                 self._write_skip_log(f"error_{idx}", source_url)
                 self._stop_article_log()
+                all_succeeded = False
                 continue
 
         log.info("全部处理完成")
+        return all_succeeded
 
 
 def process_yitang_wiki(task, config, creds):
@@ -2079,13 +2707,80 @@ def process_yitang_wiki(task, config, creds):
         "source_url": task["source_wiki_url"],
         "target_url": task.get("target_wiki_url", ""),
         "output_name": task.get("output_name", ""),
+        "no_attachments": task.get("no_attachments", False),
+        "full_copy": task.get("full_copy", False),
+        "exclude_before_heading": task.get("exclude_before_heading", ""),
+        "exclude_after_heading": task.get("exclude_after_heading", ""),
+        "include_start_heading": task.get("include_start_heading", ""),
+        "include_end_heading": task.get("include_end_heading", ""),
     }
-    copier.run(mappings=[mapping])
+    return copier.run(mappings=[mapping])
 
 
 if __name__ == "__main__":
-    import sys
-    copier = YitangCopier()
-    copier.dry_run = "--dry-run" in sys.argv
-    copier.resume = "--resume" in sys.argv
-    copier.run()
+    import argparse
+    parser = argparse.ArgumentParser(description="一堂文档复制到飞书 wiki")
+    parser.add_argument("url_yitangwiki", nargs="?", help="一堂 wiki URL")
+    parser.add_argument("url_feishuwiki", nargs="?", help="目标飞书 wiki URL")
+    parser.add_argument("--dry-run", action="store_true", help="仅解析转换，不写入飞书")
+    parser.add_argument("--resume", action="store_true", help="沿用断点/缓存继续处理")
+    parser.add_argument("--full-copy", action="store_true", help="忽略标题边界，复制全文")
+    parser.add_argument("--no-attachments", action="store_true", help="不下载页面及 Sheet 内的附件")
+    parser.add_argument(
+        "--export-local-md", dest="local_md_urls", action="append", default=[], metavar="URL",
+        help="将原一堂文稿全文导出为本地 Markdown；可重复传入多个 URL，不写入飞书",
+    )
+    parser.add_argument("--exclude-before-heading", default=None, help="排除该标题完整章节及之前内容")
+    parser.add_argument("--exclude-after-heading", default=None, help="排除该标题完整章节及之后内容")
+    parser.add_argument("--include-start-heading", default=None, help="从该标题开始复制")
+    parser.add_argument("--include-end-heading", default=None, help="复制该标题完整章节后停止")
+    args = parser.parse_args()
+
+    if args.local_md_urls and (args.url_yitangwiki or args.url_feishuwiki):
+        parser.error("--export-local-md 不能与 <url_yitangwiki> <url_feishuwiki> 同时使用")
+    if not args.local_md_urls and bool(args.url_yitangwiki) != bool(args.url_feishuwiki):
+        parser.error("请同时提供 <url_yitangwiki> 和 <url_feishuwiki>")
+    if not is_valid_target_wiki_url(args.url_feishuwiki):
+        parser.error(TARGET_WIKI_URL_ERROR)
+
+    copier = YitangCopier(include_input=not bool(args.url_yitangwiki or args.local_md_urls))
+    copier.dry_run = args.dry_run
+    copier.resume = args.resume
+    overrides = {
+        key: value
+        for key, value in {
+            "exclude_before_heading": args.exclude_before_heading,
+            "exclude_after_heading": args.exclude_after_heading,
+            "include_start_heading": args.include_start_heading,
+            "include_end_heading": args.include_end_heading,
+        }.items()
+        if value is not None
+    }
+    if args.full_copy:
+        overrides["full_copy"] = True
+    if args.no_attachments:
+        overrides["no_attachments"] = True
+
+    mappings = None
+    if args.url_yitangwiki:
+        mappings = [{
+            "source_url": args.url_yitangwiki,
+            "target_url": args.url_feishuwiki,
+            "output_name": "",
+            "no_attachments": args.no_attachments,
+            "full_copy": args.full_copy,
+            "exclude_before_heading": args.exclude_before_heading or "",
+            "exclude_after_heading": args.exclude_after_heading or "",
+            "include_start_heading": args.include_start_heading or "",
+            "include_end_heading": args.include_end_heading or "",
+        }]
+    elif args.local_md_urls:
+        mappings = [{
+            "source_url": url,
+            "target_url": "",
+            "output_name": "",
+            "full_copy": True,
+            "local_only": True,
+            "no_attachments": args.no_attachments,
+        } for url in args.local_md_urls]
+    raise SystemExit(0 if copier.run(mappings=mappings, overrides=overrides) else 1)

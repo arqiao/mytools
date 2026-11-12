@@ -1,4 +1,13 @@
-"""飞书文档 URL → 本地 Markdown 文件下载工具"""
+"""飞书文档 URL → 本地 Markdown 文件下载工具
+
+用法:
+  # 下载飞书文档为本地 .md 文件
+  python src/url2md.py https://xxx.feishu.cn/wiki/xxx -o output/demo.md
+
+参数:
+  url              飞书文档 URL（必填）
+  -o, --output     输出文件路径（必填）
+"""
 
 import argparse
 import logging

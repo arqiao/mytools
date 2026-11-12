@@ -5,62 +5,36 @@
 """
 
 import logging
-import time
 from pathlib import Path
+import sys
 
 import requests
-import yaml
 
-SCRIPT_DIR = Path(__file__).parent
-PROJECT_DIR = SCRIPT_DIR.parent
-CFG_DIR = PROJECT_DIR / "cfg"
+sys.path.insert(0, str(Path.home() / ".local/share/arqiao-tools/feishu-access"))
+from feishu_access.auth import ensure_user_token, save_tokens
 
 log = logging.getLogger(__name__)
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
+SECRETS_FEISHU_PATH = Path.home() / ".config" / "secrets" / "gfeishu.yaml"
+SECRETS_AUTH_BLOCK = "auth_dl-video"
+
+
+def _persist_auth_tokens(access_token: str, refresh_token: str, expire_time: int) -> None:
+    """兼容入口：共享模块加锁并精确写回当前项目授权。"""
+    save_tokens(SECRETS_AUTH_BLOCK, {
+        "user_access_token": access_token,
+        "user_refresh_token": refresh_token,
+        "user_token_expire_time": expire_time,
+    }, path=SECRETS_FEISHU_PATH)
 
 
 def ensure_feishu_token(creds: dict, session: requests.Session) -> str:
-    """确保飞书 user_access_token 有效，过期则刷新并持久化。返回 token 字符串。"""
-    expire = creds["feishu"].get("user_token_expire_time", 0)
-    if time.time() < expire - 300:
-        return creds["feishu"]["user_access_token"]
-
-    # 1) 获取 app_access_token
-    app_resp = session.post(
-        f"{FEISHU_BASE}/auth/v3/app_access_token/internal",
-        json={
-            "app_id": creds["feishu"]["app_id"],
-            "app_secret": creds["feishu"]["app_secret"],
-        },
-        timeout=15,
-    )
-    app_resp.raise_for_status()
-    app_token = app_resp.json().get("app_access_token", "")
-
-    # 2) 用 app_token 刷新 user_access_token
-    resp = session.post(
-        f"{FEISHU_BASE}/authen/v1/oidc/refresh_access_token",
-        json={
-            "grant_type": "refresh_token",
-            "refresh_token": creds["feishu"]["user_refresh_token"],
-        },
-        headers={"Authorization": f"Bearer {app_token}"},
-        timeout=15,
-    )
-    data = resp.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"飞书 token 刷新失败: {data}")
-
-    td = data["data"]
-    creds["feishu"]["user_access_token"] = td["access_token"]
-    creds["feishu"]["user_refresh_token"] = td["refresh_token"]
-    creds["feishu"]["user_token_expire_time"] = int(time.time()) + td["expires_in"]
-
-    with open(CFG_DIR / "credentials.yaml", "w", encoding="utf-8") as f:
-        yaml.dump(creds, f, allow_unicode=True)
-    log.info("飞书 token 已刷新")
-    return td["access_token"]
+    """保留项目接口；Token 检查、刷新和持久化全部委托公共模块。"""
+    tokens = ensure_user_token(SECRETS_AUTH_BLOCK, session=session, path=SECRETS_FEISHU_PATH)
+    creds.setdefault("feishu", {}).update(tokens)
+    creds.setdefault(SECRETS_AUTH_BLOCK, {}).update(tokens)
+    return tokens["user_access_token"]
 
 
 def feishu_headers(creds: dict) -> dict:

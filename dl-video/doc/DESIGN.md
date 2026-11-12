@@ -65,7 +65,8 @@ dl-video/
 │   ├── s1w_taobao.py        # 淘宝直播下载模块
 │   ├── s2_wiki.py           # Step2 调度器：下载教学文档 + 写入飞书 wiki
 │   ├── s2w_yitang_wiki.py   # 一堂文稿复制模块
-│   ├── s3_subtitle.py       # Step3: MP3 → 字幕（Whisper fallback）
+│   ├── s3_subtitle.py       # Step3: 媒体文件 → 字幕（Whisper fallback）
+│   ├── s3_speaker.py        # Step3 addon: pyannote 说话人标注
 │   ├── s4_srt_fix.py        # Step4: LLM 对比文档修订字幕
 │   ├── s5_addon.py          # Step5: 提取字幕中的补充内容
 │   ├── url2md.py            # 飞书 wiki 转 markdown 工具
@@ -539,32 +540,74 @@ dl-video/
 
 ### Step3: Whisper 字幕 (s3_subtitle.py)
 
-**输入**：`output/{title}.mp3`（s1 产出的音频）
-**依赖**：`subtitle_from_mp3.transcribe_whisper()`（已内化）+ openai-whisper
-**输出**：`output/{title}_wm.srt`（Whisper 生成的字幕）
+**输入**：`output/{title}.mp3` / `output/{title}.m4a`，也支持 `.mp4`、`.mov`、`.mkv`、`.webm`、`.ts` 等常见视频文件
+**依赖**：本地 Whisper 后端（Apple Silicon Mac 默认 `mlx-whisper`；其他环境可用 `faster-whisper`）
+**输出**：
+- Mac 默认：`output/{title}.mlx_turbo.srt`
+- MLX 完整 large-v3：`output/{title}.mlx_l3.srt`
+- faster-whisper medium：`output/{title}.wm.srt`
 **跳过条件**：如果 `output/{title}_ori.srt` 已存在（s1 已获取到字幕），则跳过
 
+**媒体预处理**：
+- 音频文件可直接转写；大文件会先转成本机临时目录中的 16kHz 单声道 WAV，减少内存占用并规避 NAS/SMB 随机读取问题
+- 视频文件会先提取音频轨道并转为本机临时 16kHz WAV，再交给 Whisper 或云端语音后端
+- 字幕输出路径仍基于原始媒体文件，视频 `demo.mp4` 会输出 `demo.mlx_l3.srt` 等同名前缀文件
+
 **长音频断点续转**：
-- 长音频按 30 分钟分段转写，每段完成后 `flush()` 落盘
+- faster-whisper 长音频按分段转写，每段完成后 `flush()` 落盘
 - 中断后重新运行时，解析已有 srt 文件的最后一条字幕的结束时间和序号
 - 根据结束时间反算已完成的段号，从下一段继续，srt 序号连续
 - 每段转写后执行 `gc.collect()` + `torch.cuda.empty_cache()` 释放显存，缓解 CUDA OOM
 
-**配置参数**（config.yaml）：
-```yaml
-whisper:
-  model: "medium"      # Whisper 模型大小
-  force_cpu: false      # 强制使用 CPU
-```
+**进度提示**：
+- MLX 转写无逐段回调，脚本每 10 秒在同一行刷新一次估算进度，显示估算百分比、预计剩余时间和已用时间
+- MLX 首次使用模型默认速度估算；完整转写成功后记录本机实测速度到 `cfg/whisper_speed.json`，后续同模型用历史速度平滑估算
+- faster-whisper 短音频按字幕时间输出百分比
+- faster-whisper 长音频输出段号、段内心跳和整体进度
+
+**命令参数**：
+- `--backend auto|mlx|faster-whisper`
+- `--model large-v3-turbo|large-v3|medium|large|small|tiny`
+- `--cpu`
+
+**模型下载**：
+- MLX 模型不会在转写时隐式下载；缺模型时提示运行 `python src/tools/model_downloader.py --backend mlx <model>`
+- faster-whisper 模型仍可由下载器或 s3 自动下载
+
+### Step3 addon: 说话人标注 (s3_speaker.py)
+
+**输入**：
+- 音频：`output/{title}.mp3`
+- 字幕：任一已有 SRT，例如 `output/{title}.mlx_turbo.srt`
+
+**依赖**：`pyannote.audio` + Hugging Face token；需要在 Hugging Face 接受 `pyannote/speaker-diarization-community-1` 模型授权条款
+
+**输出**：默认 `output/{subtitle_stem}.speaker.srt`
+
+**核心逻辑**：
+- 不重新转写音频，只对已有 SRT 做后处理
+- 运行 pyannote speaker diarization 得到 `(start, end, speaker)` 分段
+- 对每条字幕计算与所有 speaker 分段的时间重叠
+- 使用重叠时长最大的 speaker 作为该字幕标签
+- 保留 pyannote 原始标签，正文格式为 `[SPEAKER_00] 字幕内容`
+
+**命令参数**：
+- `audio_file`
+- `srt_file`
+- `--backend pyannote`
+- `--model pyannote/speaker-diarization-community-1`
+- `--token`
+- `--output`
+- `--unknown`
 
 ### Step4: 字幕修订 (s4_srt_fix.py)
 
 **输入**：
-- 字幕：`output/{title}_ori.srt`（优先）或 `output/{title}_wm.srt`
+- 字幕：`output/{title}_ori.srt`（优先）或任一 s3 引擎字幕（后缀来自 `s3_engine_suffix`）
 - 教学文档：`output/{title}_wiki.md`（可选）
 **依赖**：`srt_fix` 模块（已内化）+ LLM API
 **输出**：
-- `output/{title}_ori_fix.srt` 或 `output/{title}_wm_fix.srt` — 修订后的字幕
+- `output/{subtitle_stem}_fix.srt` — 修订后的字幕
 - `output/{title}_ori_fix_changelog.md` — 修订变更日志
 
 **逻辑**：
@@ -594,7 +637,7 @@ llm:
 ### Step5: 生成 Addon (s5_addon.py)
 
 **输入**：
-- 字幕：优先 `_ori_fix.srt` → `_wm_fix.srt` → `_ori.srt` → `_wm.srt`
+- 字幕：优先 `_ori_fix.srt` → 任一 s3 引擎的 `_fix.srt` → `_ori.srt` → 任一 s3 引擎字幕
 - 教学文档：`output/{title}_wiki.md`（可选）
 **依赖**：`addon` 模块（已内化）+ LLM API
 **输出**：`output/{title}_addon.md` — 补充内容报告
@@ -630,9 +673,11 @@ output:
 
 # 字幕引擎后缀映射
 s3_engine_suffix:
-  whisper_medium: "_wm"
-  whisper_large: "_wl"
-  # ...
+  whisper_medium: ".wm"
+  whisper_large: ".wl"
+  mlx_whisper_large_v3_turbo: ".mlx_turbo"
+  mlx_whisper_large_v3: ".mlx_l3"
+  # 其他引擎略
 
 # 字幕修订配置
 s4_fix:
@@ -643,7 +688,7 @@ s4_fix:
 
 # 补充内容提取配置
 s5_analysis:
-  chunk_size: 30000
+  chunk_size: 12000
   prompt_subtitle: "addon-subtitle.md"
   prompt_discussion: "addon-discussion.md"
   prompt_digest: "addon-digest.md"
@@ -651,15 +696,25 @@ s5_analysis:
 # LLM 模型配置池
 llm_plan:
   current_s4:
-    name: "minimax"
-    temperature: 0.2
+    name: "agentplan_seed21_lite"
+    temperature: 0.0
   current_s5:
-    name: "minimax"
-    temperature: 0.3
-  minimax:
-    model: "MiniMax-Text-01"
-    base_url: "https://api.minimax.chat/v1"
-    max_tokens: 8192
+    name: "agentplan_seed21_pro"
+    temperature: 0.1
+  agentplan_seed21_lite:
+    model: "doubao-seed-2.1-lite"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 16384
+    thinking: "disabled"
+    structured_output: true
+    credential_source: "volcengine-agentplan"
+  agentplan_seed21_pro:
+    model: "doubao-seed-2.1-pro"
+    base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+    max_tokens: 32768
+    thinking: "disabled"
+    structured_output: true
+    credential_source: "volcengine-agentplan"
   # volcengine, dashscope, deepseek 等其他模型...
 ```
 
@@ -677,10 +732,12 @@ s1_yitang_ailive:
     output_prefix: "AI落地Live_"    # 视频文件命名约定
     query_copystr: "AI落地Live"     # 全文复制的标题关键词
 
-# 一堂专题课 wiki 的复制范围
+# 一堂专题课 wiki 的默认复制边界（任务字段可覆盖）
 s1_yitang_wikicopy:
-  start_heading: "开始上课"
-  end_heading: "作业与Candy"
+  default_exclude_before_heading: ""
+  default_include_start_heading: "开始上课"
+  default_exclude_after_heading: ""
+  default_include_end_heading: "作业与Candy"
 
 # 回放任务列表
 tasks:
@@ -690,6 +747,11 @@ tasks:
     target_wiki_url: ""           # 写入目标飞书 wiki（留空则不写入）
     title: ""                     # 手动指定标题（留空则自动获取）
     output_name: ""               # 手动指定输出文件名（不含扩展名）
+    full_copy: false               # true 时全文复制，忽略标题边界
+    exclude_before_heading: ""     # 排除该标题完整章节及之前内容
+    exclude_after_heading: ""      # 排除该标题完整章节及之后内容
+    include_start_heading: ""      # 从该标题开始复制
+    include_end_heading: ""        # 复制该标题完整章节后停止
 
   - source_type: "feishu_minutes"
     source_huifang_url: "https://xxx.feishu.cn/minutes/xxx"
@@ -741,6 +803,12 @@ minimax:
 - 自动打开浏览器跳转飞书授权页面
 - 收到 authorization_code 后换取 user_access_token + refresh_token
 - 写回 credentials.yaml
+
+### 飞书图片下载 Cookie
+
+`s2w_yitang_wiki.py` 读取飞书文档 blocks 使用 Open API 的 `user_access_token`，但 `feishu://token/...` 图片通过 `internal-api-drive-stream.feishu.cn` 的预览接口下载，该接口需要 `feishu.browser_cookie`。因此文本/图片可能出现认证结果不同：文本读取成功而图片返回 401。
+
+更新 Cookie 的方式：在 Chrome 登录能访问源文档图片的账号，打开源页面，在 Network 勾选 Preserve log 并刷新；搜索 `preview/`（必要时先点击图片），从 `internal-api-drive-stream.feishu.cn` 请求的 Request Headers 复制完整 `Cookie` 值，单行写入 `~/.config/secrets/gfeishu.yaml` 的 `feishu.browser_cookie`。Cookie 必须属于源租户，且不应提交或记录到项目文件。
 
 
 ## 设计决策与经验总结（2026-03-16 ~ 03-22）
@@ -1020,7 +1088,7 @@ minimax:
 
 **ffmpeg 音频提取容错**：部分平台的视频流有小错误（如淘宝直播的 TS 流），ffmpeg 默认会中断。加 `-err_detect ignore_err` 可以容忍这些错误继续提取音频。
 
-**Whisper 模型缓存**：`faster-whisper` 默认每次启动都联网检查模型版本，在离线环境会超时失败。`model_downloader.py` 的 `get_model_path()` 优先返回本地缓存路径，避免联网检查。
+**Whisper 模型缓存**：`model_downloader.py` 统一管理 faster-whisper 与 MLX Whisper 模型缓存。faster-whisper 路径会优先用本地 snapshot，避免联网检查；MLX 路径不会在转写时隐式下载，缺模型时提示先运行 `python src/tools/model_downloader.py --backend mlx <model>`。
 
 **飞书妙记跨租户双通道**：同一个飞书应用的 user_access_token 只能访问本租户的妙记。跨租户（如 waytoagi.feishu.cn）必须用 browser_cookie 走 Cookie API。Cookie API 的 transcript 数据结构与 Open API 不同（`sentences[].contents[]` vs 直接 `text`），代码中需要归一化处理。
 

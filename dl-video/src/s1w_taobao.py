@@ -1,11 +1,24 @@
+# 参数调用示例:
+#   python src/s1w_taobao.py
 """Step1-taobao: 淘宝直播（螳螂直播）回放下载 — 视频 + 音频
+
+用法:
+  # 通过 input.yaml 配置任务（source_type: "taobao"）
+  python src/s1_huifang.py
+
+  # 直接运行（读取 input.yaml 中 taobao 类型任务）
+  python src/s1w_taobao.py
+
+配置:
+  cfg/input.yaml  — tasks 中 source_type: "taobao", source_huifang_url: 淘宝直播回放 URL
+  cfg/credentials.yaml — taobao.access_token / bearer_token / company_id / union_id
 
 API 流程:
   URL → 提取 linkCode
   linkParam/getParamByCode → companyId, courseId, unionId
   selectCourseInfo → 标题, liveId, liveVendor, liveMode
   agora/live/video → m3u8 URL (3条CDN线路)
-  ffmpeg → 下载 .ts + 提取 .mp3
+  ffmpeg → 下载 .ts + 提取 .m4a
 """
 
 import logging
@@ -49,6 +62,7 @@ def parse_taobao_url(source_url: str) -> tuple[str, str]:
 def make_session(creds_taobao: dict) -> requests.Session:
     """创建带认证头的 session"""
     s = requests.Session()
+    s.trust_env = False
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Content-Type": "application/json",
@@ -83,28 +97,28 @@ def get_link_params(session, api_base, link_code):
     raise RuntimeError(f"getParamByCode 失败 (tried {candidates}): {data}")
 
 
-def get_course_info(session, api_base, company_id, union_id, course_id):
+def get_course_info(session, api_base, company_id, union_id, course_id, course_flag):
     """selectCourseInfo → 课程详情（标题, liveId, liveMode 等）"""
     url = f"{api_base}/scrm-course-api/pass/selectCourseInfo"
     body = {
         "companyId": company_id,
         "unionId": union_id,
         "id": course_id,
-        "flag": "CAMP-COURSE",
+        "flag": course_flag,
     }
     resp = session.post(url, json=body, timeout=15)
     data = resp.json()
     if data.get("code") != 200:
         raise RuntimeError(f"selectCourseInfo 失败: {data}")
     info = data["data"]
-    title = info.get("name", "")
+    title = info.get("courseExternalShowName") or info.get("showName") or info.get("videoName") or info.get("name", "")
     live_id = info.get("liveNum") or info.get("courseId") or info.get("id")
     camp_period_id = info.get("campPeriodId", "")
     live_vendor = info.get("liveVendor", "")
     live_mode = info.get("liveMode", "")
     live_status = info.get("liveStatus", "")
     log.info(f"课程: {title}, liveId={live_id}, vendor={live_vendor}, "
-             f"mode={live_mode}, status={live_status}")
+             f"mode={live_mode}, status={live_status}, flag={course_flag}")
     return {
         "title": title, "live_id": live_id,
         "camp_period_id": camp_period_id,
@@ -154,13 +168,14 @@ def process_taobao(task, config, creds):
     course_id = params.get("id", "")
     union_id = params.get("unionId") or taobao_creds.get("union_id", "")
     live_id = params.get("liveId", "")
+    course_flag = params.get("flag") or "CAMP-COURSE"
 
     # 2. 获取课程信息（标题等）
-    course = get_course_info(session, api_base, company_id, union_id, course_id)
+    course = get_course_info(session, api_base, company_id, union_id, course_id, course_flag)
     title = config.get("titleShougong", "") or task.get("title") or course["title"] or f"taobao_{link_code}"
     base_name = safe_filename(title)
     live_id = live_id or course["live_id"]
-    log.info(f"标题: {title}, 文件名: {base_name}, liveId: {live_id}")
+    log.info(f"标题: {title}, 文件名: {base_name}, liveId: {live_id}, flag={course_flag}")
     m3u8_url, thumb_url = get_replay_url(session, api_base, live_id)
 
     # 4. 下载视频（mp4 格式，ts 格式音频流有兼容性问题）
@@ -170,7 +185,7 @@ def process_taobao(task, config, creds):
         return
 
     # 5. 提取音频
-    audio_path = OUTPUT_DIR / f"{base_name}.mp3"
+    audio_path = OUTPUT_DIR / f"{base_name}.m4a"
     extract_audio(video_path, audio_path)
 
     log.info(f"淘宝直播处理完成: {base_name}")
