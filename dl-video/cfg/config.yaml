@@ -38,8 +38,8 @@ input:
     # 示例：output/260310-创新11班.md 或 https://arqiaoknow.feishu.cn/wiki/xxx
     transcript: ""
   s5:
-    # 逐字稿（支持文件路径或飞书 URL，可选）
-    # 示例：output/260310-创新11班.md 或 https://arqiaoknow.feishu.cn/wiki/xxx
+    # 逐字稿（本地 Markdown 路径；当前 S5 不直接读取 URL）
+    # 示例：output/260310-创新11班.md
     transcript: ""
     # 字幕文件路径（支持相对/绝对路径，需含 .srt 后缀）
     # 示例：output/260310-创新11班_fix.srt

@@ -20,90 +20,27 @@ SIGNED = "https://finder.video.qq.com/media?token=secret&encfilekey=key&fileForm
 SRT = "1\n00:00:00,000 --> 00:00:01,000\n先理解问题，再提出方案。\n"
 
 
-class ResolverTests(unittest.TestCase):
-    def test_official_new_chain_and_complete_signed_url(self):
-        page = MagicMock()
-        page.evaluate.side_effect = [
-            {"status": 200, "data": {"code": 0, "data": {"wx_export_id": "export", "desc": "标题"}}},
-            {"status": 200, "data": {"videoUrl": SIGNED}},
-        ]
-        result = wx._resolve_on_page(page, SHARE, 30)
-        self.assertEqual(result["url"], SIGNED)
-        self.assertEqual(page.evaluate.call_args_list[1].args[1]["body"], {"exportId": "export"})
-        self.assertEqual(page.evaluate.call_args_list[1].args[1]["path"], "/api/findergetobjecturl")
+class CompatibilityTests(unittest.TestCase):
+    def test_adapter_passes_explicit_paths_and_audio_contract(self):
+        result = {"status": "success", "video_path": "/tmp/wx_test.mp4", "audio_path": "/tmp/wx_test.m4a"}
+        with patch.object(wx._core, "download", return_value=result) as call:
+            self.assertEqual(wx.process_wechat_channels({"source_huifang_url": SHARE}, {}), result)
+        args, kw = call.call_args
+        self.assertEqual(args[1], wx.PROJECT_DIR / "out-wechat")
+        self.assertEqual(args[2]["browser_profile"], str(wx.PROJECT_DIR / ".browser_data_wxchannels"))
+        self.assertTrue(args[2]["require_audio"])
+        self.assertTrue(args[2]["extract_audio"])
 
-    def test_empty_success_stops_before_object_request(self):
-        page = MagicMock()
-        page.evaluate.return_value = {"status": 200, "data": {"code": 0, "data": {"wx_export_id": ""}}}
-        with self.assertRaisesRegex(wx.ChannelsError, "wx_export_id"):
-            wx._resolve_on_page(page, SHARE, 30)
-        self.assertEqual(page.evaluate.call_count, 1)
+    def test_adapter_failure_stops_legacy_caller(self):
+        with patch.object(wx._core, "download", return_value={"status": "failed", "error_code": "auth_expired"}):
+            with self.assertRaises(wx.ChannelsError) as caught:
+                wx.process_wechat_channels({"source_huifang_url": SHARE}, {})
+            self.assertEqual(caught.exception.code, "auth_expired")
 
-    def test_anonymous_200_is_not_login_and_binding_not_required(self):
-        self.assertFalse(wx._is_logged_in({"id": "guest", "anonUser": {"isAnon": True}}))
-        self.assertTrue(wx._is_logged_in({"userId": "account", "wxIsBind": False}))
-
-    def test_transport_errors_do_not_disclose_credentials(self):
-        page = MagicMock()
-        page.evaluate.side_effect = RuntimeError(SIGNED)
-        with self.assertRaises(wx.ChannelsError) as caught:
-            wx._request(page, "/api/findergetobjecturl", {})
-        self.assertNotIn("secret", str(caught.exception))
-
-    def test_bad_urls_are_rejected(self):
-        for url in ("https://weixin.qq.com.evil/sph/abc", "https://weixin.qq.com/sph/abc/../../x", "not a url"):
-            with self.subTest(url=url), self.assertRaises(wx.ChannelsError):
-                wx.extract_share_url(url)
-
-    def test_incomplete_or_html_download_never_promoted(self):
-        for body, declared in [(b"fake HTML response", 18), (b"\0\0\0\x18ftypisom", 999)]:
-            with tempfile.TemporaryDirectory() as directory:
-                response = MagicMock()
-                response.__enter__.return_value = response
-                response.status_code = 200
-                response.headers = {"Content-Length": str(declared)}
-                response.iter_content.return_value = [body]
-                target = Path(directory) / "video.mp4"
-                with patch.object(wx.requests, "get", return_value=response), self.assertRaises(wx.ChannelsError):
-                    wx._download_mp4(SIGNED, target, False)
-                self.assertFalse(target.exists())
-
-    def test_failed_audio_does_not_publish_manifest(self):
-        with tempfile.TemporaryDirectory() as directory:
-            _, _, manifest = wx.artifact_paths(SHARE, Path(directory))
-            with patch.object(wx, "resolve_video", return_value={"url": SIGNED}), \
-                 patch.object(wx, "_download_mp4", return_value=10), \
-                 patch.object(wx, "extract_audio", return_value=False), self.assertRaises(wx.ChannelsError):
-                wx.process_wechat_channels({"source_huifang_url": SHARE}, {"path_wechat_dir": directory})
-            self.assertFalse(manifest.exists())
-
-    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "requires local ffmpeg/ffprobe")
-    def test_download_audio_validation_and_resume_with_real_local_media(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            fixture = root / "fixture.mp4"
-            subprocess.run([wx.FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=s=64x64:d=1",
-                            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "1",
-                            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(fixture)],
-                           check=True, capture_output=True, timeout=30)
-            content = fixture.read_bytes()
-            response = MagicMock()
-            response.__enter__.return_value = response
-            response.status_code = 200
-            response.headers = {"Content-Length": str(len(content))}
-            response.iter_content.return_value = [content]
-            config = {"path_wechat_dir": str(root / "output")}
-            with patch.object(wx, "resolve_video", return_value={"url": SIGNED, "title": "测试"}), \
-                 patch.object(wx.requests, "get", return_value=response) as get:
-                result = wx.process_wechat_channels({"source_huifang_url": SHARE}, config)
-                self.assertEqual(get.call_args.args[0], SIGNED)
-            self.assertTrue(Path(result["audio_path"]).is_file())
-            manifest = wx.artifact_paths(SHARE, root / "output")[2]
-            self.assertNotIn("secret", manifest.read_text())
-            self.assertNotIn("videoUrl", manifest.read_text())
-            with patch.object(wx, "resolve_video", side_effect=AssertionError("resume must be offline")):
-                resumed = wx.process_wechat_channels({"source_huifang_url": SHARE}, config)
-            self.assertEqual(resumed["audio_path"], result["audio_path"])
+    def test_imported_functions_have_one_implementation(self):
+        self.assertIs(wx.artifact_paths, wx._core.artifact_paths)
+        self.assertIs(wx.resolve_video, wx._core.resolve_video)
+        self.assertIs(wx.validate_media, wx._core.validate_media)
 
 
 class PipelineTests(unittest.TestCase):

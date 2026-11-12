@@ -2,9 +2,13 @@
 
 ## 流程
 
-Step1 使用 `src/s1w_wechatchannels.py`，复用腾讯元宝网页登录态：
+Step1 保留 `src/s1w_wechatchannels.py` 兼容入口，解析、下载和校验的唯一实现位于 `/Users/arqiao/.local/share/arqiao-tools/media-download/`，全局命令为 `media-download`。接口合同见该目录 README；迁移结果、回滚与 group-digest 对接见 [公共下载工具迁移交接](公共下载工具迁移交接.md)。
 
-`getuserinfo → get_parse_result → data.wx_export_id → findergetobjecturl → videoUrl → MP4 → M4A`
+复用腾讯元宝既有 profile，在内存读取 Cookie 后优先通过 HTTP：
+
+`getuserinfo → get_parse_result → wx_export_id → findergetobjecturl → videoUrl → MP4 → M4A`
+
+备用路线共用解析结果：`playable_url 的 token + eid（可用 wx_export_id）→ get_feed_info`。网络或字段结构异常才允许一次浏览器解析回退；headless 下认证失败、权限拒绝、限流不重复开浏览器。读取 profile 本身仍需启动 Chromium，正常 HTTP 成功路径不加载元宝页面。
 
 没有独立 Wiki 文稿，流水线会跳过 Step2。Step3/4/5 继续调用原程序：
 
@@ -73,6 +77,10 @@ wechat_channels:
   login_timeout: 300
   request_timeout: 30
   verify_decode: true
+  # 可选公共工具参数；旧调用默认单次上限 16 GiB，公共 CLI 默认 64 MiB
+  max_bytes: 17179869184
+  retries: 1
+  codec: "auto"
 tasks:
   - source_type: "wechat_channels"
     source_huifang_url: "https://weixin.qq.com/sph/ALRGH1Htvi"
@@ -114,7 +122,7 @@ wx_ALRGH1Htvi_精华摘要.md
 
 下载清单保存标题、来源分享链接、本地文件路径、时长与完成时间；不保存 Cookie、wx_export_id 或带签名的媒体 URL。只有视频和音频均校验成功才写入成功清单。流水线核对本轮清单后把确切的 M4A 交给 S3，不再扫描其他视频的最新音频。
 
-重复执行 S1 会校验并复用已有 MP4/M4A；损坏的既有文件会报错，不自动覆盖。失败下载留下唯一名称的 `.part.mp4`，它不会被当作正式产物；当前不支持续传这些分片。默认执行 MP4 全片解码检查；`verify_decode: false` 可关闭完整解码，但仍检查文件头、下载字节数、媒体流、时长和音视频时长一致性。
+重复执行 S1 会校验并复用已有 MP4/M4A；损坏的既有文件会报错，不自动覆盖。失败下载可能留下唯一名称的 `.part.mp4`，它不会被当作正式产物；当前不支持续传这些分片。同目录同分享链接加排他锁，通过验证后无覆盖发布。默认执行 MP4 全片解码检查；`verify_decode: false` 可关闭完整解码，但仍检查文件头、下载字节数、媒体流、时长和音视频时长一致性。
 
 从 S3 接续时保留视频号 URL / 配置，以继续采用无 Wiki 模式：
 
@@ -134,7 +142,7 @@ python src/s5_addon.py --subtitle 'out-wechat/wx_ALRGH1Htvi.qwen3_asr.srt' \
 
 ## 失败与验证范围
 
-- 元宝返回 `success` 但 `wx_export_id` 为空：仍判失败，不推进后续步骤。不能由此直接判断视频已删除或作者禁止解析。
+- 元宝未返回 `wx_export_id` 且没有可用的 playable_url token/eid：判空解析或缺字段，不能下载。仅缺 wx_export_id 时，已有 token/eid 可使用备用接口。不能由空解析直接断定视频已删除。
 - 登录过期：用可见浏览器重新登录；无窗口模式立即报错。
 - 签名地址失效：重新运行 S1 重新解析。程序保留完整媒体 URL，不擅自删除查询参数，也不声称一定取得上传原片/最高画质。
 - S1 失败、音频提取失败或交接清单不匹配：以非零状态退出/停止流水线。
@@ -149,6 +157,6 @@ python src/s5_addon.py --subtitle 'out-wechat/wx_ALRGH1Htvi.qwen3_asr.srt' \
 
 文件发布时间：实测元宝解析/取流接口没有提供发布时间；原页面详情接口对该批次只返回前往微信查看的提示，未提供 `createtime`。因此未改写视频文件时间，不能用下载时间、签名过期时间或推测日期代替发布时间。
 
-实现参考：[元宝两段解析的公开源码](https://github.com/yanlingLabs/video-extract-mcp/blob/main/src/resolve/wechat.ts)。本项目保留自己的配置、下载校验和流水线交接逻辑。
+协议来源与许可证保留于公共工具 `THIRD_PARTY_NOTICES.md`。本项目仅维护配置映射和流水线交接，不保留第二套解析、下载或校验实现。
 
-离线回归入口：`python -m unittest discover -s src -p 'test_wechat_channels.py'`。测试使用响应替身和本地生成的短 MP4，覆盖取流协议、空解析、脱敏、音频提取、重复运行、失败中断、两种字幕流程和 S5 无文稿输出；不调用真实 ASR/LLM 或飞书。
+离线回归入口：`python -m unittest discover -s src -p 'test_wechat_channels.py'`，覆盖兼容映射、失败中断、两种字幕流程和 S5 无文稿输出。公共工具测试另运行 `python3 -m unittest discover -s /Users/arqiao/.local/share/arqiao-tools/media-download/tests -v`，用响应替身与本地合成媒体验证双接口、脱敏、损坏检测、编码和并发；均不调用真实 ASR/LLM 或飞书。
